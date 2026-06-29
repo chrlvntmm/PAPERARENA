@@ -1,0 +1,77 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-neon: var(--neon);
+  --font-display: "Orbitron", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+:root {
+  --background: oklch(0.12 0.005 270);
+  --foreground: oklch(0.98 0 0);
+  --card: oklch(0.16 0.008 270);
+  --card-foreground: oklch(0.98 0 0);
+  --primary: oklch(0.92 0.18 105);
+  --primary-foreground: oklch(0.12 0.005 270);
+  --muted: oklch(0.22 0.01 270);
+  --muted-foreground: oklch(0.65 0.01 270);
+  --accent: oklch(0.92 0.18 105);
+  --accent-foreground: oklch(0.12 0.005 270);
+  --border: oklch(0.28 0.01 270);
+  --neon: oklch(0.92 0.18 105);
+}
+
+.dark { color-scheme: dark; }
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html, body, #root { height: 100%; }
+  body {
+    background-color: #0a0b0d;
+    color: var(--color-foreground);
+    font-family: "Rajdhani", "JetBrains Mono", system-ui, sans-serif;
+  }
+}
+
+@utility neon-text {
+  color: #f4ff3a;
+  text-shadow: 0 0 8px rgba(244,255,58,0.7), 0 0 20px rgba(244,255,58,0.4);
+}
+@utility neon-text-white {
+  color: #fff;
+  text-shadow: 0 0 8px rgba(255,255,255,0.7), 0 0 20px rgba(255,255,255,0.3);
+}
+@utility neon-border {
+  border: 1px solid rgba(244,255,58,0.5);
+  box-shadow: 0 0 12px rgba(244,255,58,0.15), inset 0 0 12px rgba(244,255,58,0.05);
+}
+@utility grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+@utility grid-bg-sharp {
+  background-color: #0a0b0d;
+  background-image:
+    linear-gradient(rgba(244,255,58,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(244,255,58,0.05) 1px, transparent 1px),
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+}
