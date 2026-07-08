@@ -1,10 +1,13 @@
 import type { Dir } from "./engine";
 
 export const WS_URL =
-  import.meta.env.VITE_WS_URL ?? "wss://paperarena-production.up.railway.app";
+  import.meta.env.VITE_WS_URL;
+
+if (!WS_URL) {
+  throw new Error("VITE_WS_URL is required.");
+}
 
 export type ClientMessage =
-  | { type: "auth"; publicKey: string; signature: string; message: string }
   | { type: "join_queue"; arena: "standard" | "mega"; wager: number; username: string; color: string }
   | { type: "leave_queue" }
   | { type: "input"; dir: Dir; seq: number }

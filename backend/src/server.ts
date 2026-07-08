@@ -6,17 +6,28 @@ import { ClientSession } from "./websocket/ClientSession.js";
 import { MatchmakingQueue } from "./lobby/MatchmakingQueue.js";
 import { MatchManager } from "./game/MatchManager.js";
 import { Match } from "./game/Match.js";
-import { verifySolanaAuth, requireAuth } from "./auth/solana.middleware.js";
+import { requireAuth } from "./auth/session.middleware.js";
 import { verifyEscrowBuyIn } from "./auth/escrow.service.js";
 import { ClientMessageSchema } from "./types/protocol.js";
+import { db } from "./db/postgres.js";
+import { handleHttpRequest } from "./http/auth.routes.js";
+import { authenticateSessionToken } from "./auth/auth.service.js";
+import { getSessionTokenFromCookie } from "./auth/cookies.js";
+import { checkRateLimit, cleanupRateLimitBuckets } from "./http/rate-limit.js";
 
-const httpServer = createServer((req, res) => {
-  if (req.url === "/" || req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("ok");
-    return;
+await db.connect();
+
+const httpServer = createServer(async (req, res) => {
+  try {
+    const handled = await handleHttpRequest(req, res);
+    if (!handled) {
+      res.writeHead(404).end();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "INTERNAL_ERROR", message }));
   }
-  res.writeHead(404).end();
 });
 
 const wss = new WebSocketServer({ server: httpServer });
@@ -28,9 +39,21 @@ httpServer.listen(CONFIG.PORT, "0.0.0.0", () => {
   console.log(`[PaperArena] listening on :${CONFIG.PORT}`);
 });
 
-wss.on("connection", (ws) => {
-  const session = new ClientSession(ws);
+wss.on("connection", async (ws, req) => {
+  const rateLimit = checkRateLimit(req, "ws:connect", CONFIG.RATE_LIMIT.WS_CONNECT_MAX);
+  if (!rateLimit.ok) {
+    ws.close(1008, "Too many connection attempts");
+    return;
+  }
+
+  const identity = await authenticateSessionToken(getSessionTokenFromCookie(req));
+  const session = new ClientSession(ws, identity);
   sessions.set(session.id, session);
+  session.send(
+    identity
+      ? { type: "auth_ok", sessionId: session.id }
+      : { type: "auth_fail", reason: "No active session" },
+  );
 
   ws.on("message", async (raw) => {
     let parsed: unknown;
@@ -54,18 +77,6 @@ wss.on("connection", (ws) => {
     const msg = result.data;
 
     switch (msg.type) {
-      case "auth": {
-        const auth = await verifySolanaAuth(msg);
-        if (!auth.ok) {
-          session.send({ type: "auth_fail", reason: auth.reason ?? "Auth failed" });
-          return;
-        }
-        session.authenticated = true;
-        session.publicKey = auth.publicKey;
-        session.send({ type: "auth_ok", sessionId: session.id });
-        break;
-      }
-
       case "join_queue": {
         if (!requireAuth(session)) {
           session.send({ type: "error", code: "UNAUTH", message: "Authenticate first" });
@@ -77,7 +88,7 @@ wss.on("connection", (ws) => {
         }
 
         const escrow = await verifyEscrowBuyIn(
-          session.publicKey!,
+          session.walletAddress!,
           msg.wager,
           "pending",
         );
@@ -134,7 +145,13 @@ wss.on("connection", (ws) => {
   });
 });
 
+const rateLimitCleanup = setInterval(cleanupRateLimitBuckets, CONFIG.RATE_LIMIT.WINDOW_MS);
+rateLimitCleanup.unref();
+
 process.on("SIGTERM", () => {
+  clearInterval(rateLimitCleanup);
   wss.close();
-  httpServer.close(() => process.exit(0));
+  httpServer.close(() => {
+    void db.close().finally(() => process.exit(0));
+  });
 });

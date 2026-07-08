@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { Dir } from "../game/engine.js";
 
 export type ClientMessage =
-  | { type: "auth"; publicKey: string; signature: string; message: string }
   | { type: "join_queue"; arena: "standard" | "mega"; wager: number; username: string; color: string }
   | { type: "leave_queue" }
   | { type: "input"; dir: Dir; seq: number }
@@ -80,12 +79,6 @@ export type GameEvent =
 const dirSchema = z.enum(["up", "down", "left", "right"]);
 
 export const ClientMessageSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("auth"),
-    publicKey: z.string().min(1),
-    signature: z.string().min(1),
-    message: z.string().min(1),
-  }),
   z.object({
     type: z.literal("join_queue"),
     arena: z.enum(["standard", "mega"]),

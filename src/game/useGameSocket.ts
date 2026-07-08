@@ -135,15 +135,6 @@ export function useGameSocket() {
     });
   }, [authenticated]);
 
-  const authDev = useCallback(() => {
-    send({
-      type: "auth",
-      publicKey: "dev-pubkey",
-      signature: "dev-signature",
-      message: "paperarena-dev",
-    });
-  }, [send]);
-
   const joinQueue = useCallback(
     (arena: "standard" | "mega", wager: number, username: string, color: string) => {
       setElimination(null);
@@ -216,7 +207,6 @@ export function useGameSocket() {
     matchEnd,
     error,
     connect,
-    authDev,
     waitForAuth,
     joinQueue,
     leaveQueue,

@@ -5,14 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "migrate": "tsx src/db/migrate.ts",
     "build": "tsc",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "ws": "^8.18.0",
-    "zod": "^3.24.2",
+    "@types/cookie": "^0.6.0",
+    "@types/pg": "^8.20.0",
+    "bs58": "^6.0.0",
+    "cookie": "^2.0.1",
     "dotenv": "^16.4.7",
-    "nanoid": "^5.1.0"
+    "nanoid": "^5.1.0",
+    "pg": "^8.22.0",
+    "tweetnacl": "^1.0.3",
+    "viem": "^2.54.6",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.16.5",

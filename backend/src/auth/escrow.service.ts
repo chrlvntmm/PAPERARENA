@@ -1,4 +1,4 @@
-/** Placeholder — confirm wager locked in on-chain escrow before match lock */
+/** Confirm wager is locked in a real escrow before match lock. */
 export async function verifyEscrowBuyIn(
   publicKey: string,
   wagerUsd: number,
@@ -8,13 +8,10 @@ export async function verifyEscrowBuyIn(
   void wagerUsd;
   void matchId;
 
-  // TODO: Query Solana program account for escrow PDA
-  // TODO: Confirm lamports >= wager, status === 'locked', matchId matches
-
   if (process.env.ESCROW_BYPASS === "true") {
     return { ok: true, txSignature: "dev-bypass" };
   }
-  return { ok: false, reason: "Escrow program not deployed" };
+  return { ok: false, reason: "Escrow verification is not configured." };
 }
 
 export async function settlePayout(
@@ -26,6 +23,5 @@ export async function settlePayout(
   void netPayout;
   void matchId;
 
-  // TODO: Release escrow to winner minus platform fee
-  return { ok: true, txSignature: "dev-settlement" };
+  return { ok: false };
 }

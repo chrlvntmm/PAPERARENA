@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useEffect, useRef, useState } from "react";
 import Game from "@/game/Game";
 import { useGameSocket } from "@/game/useGameSocket";
@@ -22,7 +23,11 @@ const PLAYER_OPTIONS = [
   { n: 10, display: "MEGA ARENA", label: "10 PLAYERS\n5 MIN MATCH" },
 ];
 const WAGER_OPTIONS = [5, 10, 20];
+const PLATFORM_FEE = Number(import.meta.env.VITE_PLATFORM_FEE);
 
+if (!Number.isFinite(PLATFORM_FEE)) {
+  throw new Error("VITE_PLATFORM_FEE is required.");
+}
 
 
 const SKIN_COLORS = [
@@ -45,13 +50,35 @@ function Index() {
   const [wager, setWager] = useState(10);
   const mode = "territory" as const;
   const [phase, setPhase] = useState<LobbyPhase>("idle");
-  const [walletConnected, setWalletConnected] = useState(false);
   const [username, setUsername] = useState("PLAYER_01");
   const [skin, setSkin] = useState(SKIN_COLORS[0]);
+  const [evmSignPending, setEvmSignPending] = useState(false);
+  const [walletActionError, setWalletActionError] = useState<string | null>(null);
   const joinPendingRef = useRef(false);
   const wagerDeductedRef = useRef(false);
 
   useEffect(() => { installAudioUnlock(); }, []);
+
+  useEffect(() => {
+    if (!evmSignPending || wallet.connected || !wallet.evmWalletReady) return;
+    let cancelled = false;
+    setWalletActionError(null);
+    wallet
+      .signInEvm()
+      .then(() => {
+        if (!cancelled) setEvmSignPending(false);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setWalletActionError(err instanceof Error ? err.message : "Could not sign in with that wallet.");
+          setEvmSignPending(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [evmSignPending, wallet.connected, wallet.evmWalletReady, wallet.signInEvm]);
 
   useEffect(() => {
     if (socket.matchId && socket.playerId != null && socket.snapshot) {
@@ -60,21 +87,30 @@ function Index() {
   }, [socket.matchId, socket.playerId, socket.snapshot]);
 
   const totalPot = players * wager;
-  const fee = totalPot * 0.05;
+  const fee = totalPot * PLATFORM_FEE;
   const prize = totalPot - fee;
-  const insufficient = wallet.balance < wager;
+  const balanceUnavailable = wallet.connected && wallet.balance == null;
+  const insufficient = wallet.connected && wallet.balance != null && wallet.balance < wager;
   const isQueueing = phase === "queueing";
   const arena = players === 5 ? "standard" as const : "mega" as const;
+  const walletLabel = wallet.primaryWallet
+    ? `${wallet.primaryWallet.address.slice(0, 4)}...${wallet.primaryWallet.address.slice(-4)}`
+    : "CONNECT WALLET";
 
   const handleJoin = async () => {
     playClickSound();
-    if (insufficient || isQueueing) return;
+    if (!wallet.connected) {
+      setWalletActionError(null);
+      setEvmSignPending(true);
+      wallet.openEvmPicker();
+      return;
+    }
+    if (balanceUnavailable || insufficient || isQueueing) return;
     if (!wallet.deduct(wager)) return;
     wagerDeductedRef.current = true;
     joinPendingRef.current = true;
     setPhase("queueing");
     socket.connect();
-    socket.authDev();
     try {
       await socket.waitForAuth();
       if (joinPendingRef.current) {
@@ -148,12 +184,43 @@ function Index() {
             >
               <HelpIcon /> HOW TO PLAY
             </Link>
-            <button
-              onClick={() => { playClickSound(); setWalletConnected(v => !v); }}
-              className="font-display text-xs tracking-[0.3em] px-5 py-3 neon-border rounded hover:bg-white/5 transition"
-            >
-              {walletConnected ? "0xA1…F7E2" : "CONNECT WALLET"}
-            </button>
+            <ConnectButton.Custom>
+              {({ account, chain, mounted, openConnectModal }) => {
+                const evmSelected = mounted && account && chain;
+                const label = wallet.connected
+                  ? walletLabel
+                  : evmSelected
+                    ? evmSignPending
+                      ? "SIGNING..."
+                      : "SIGN TO LOGIN"
+                    : "CONNECT WALLET";
+
+                return (
+                  <button
+                    onClick={async () => {
+                      playClickSound();
+                      setWalletActionError(null);
+                      try {
+                        if (wallet.connected) {
+                          setEvmSignPending(false);
+                          await wallet.signOut();
+                          return;
+                        }
+                        setEvmSignPending(true);
+                        if (evmSelected) return;
+                        openConnectModal?.();
+                      } catch (err) {
+                        setWalletActionError(err instanceof Error ? err.message : "Wallet action failed.");
+                        setEvmSignPending(false);
+                      }
+                    }}
+                    className="font-display text-xs tracking-[0.3em] px-5 py-3 neon-border rounded hover:bg-white/5 transition"
+                  >
+                    {label}
+                  </button>
+                );
+              }}
+            </ConnectButton.Custom>
           </div>
         </header>
 
@@ -255,7 +322,7 @@ function Index() {
                   <span className="font-display text-4xl font-black tabular-nums" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.6)" }}>${totalPot.toFixed(2)}</span>
                 </div>
                 <div className="flex items-baseline justify-between mt-1">
-                  <span className="text-xs tracking-wider font-display text-white/60">Platform Fee (5%)</span>
+                  <span className="text-xs tracking-wider font-display text-white/60">Platform Fee ({(PLATFORM_FEE * 100).toFixed(0)}%)</span>
                   <span className="font-mono text-base font-semibold text-white/60 tabular-nums">−${fee.toFixed(2)}</span>
                 </div>
                 <div className="text-[10px] text-white/50 font-display tracking-wider pt-3">Fee deducted from survivor payouts at cash-out.</div>
@@ -265,6 +332,18 @@ function Index() {
             {socket.error && (
               <div className="mt-4 px-4 py-3 rounded-lg text-center text-sm font-display tracking-wider" style={{ background: "rgba(255,58,107,0.12)", color: "#ff3a6b", border: "1px solid rgba(255,58,107,0.35)" }}>
                 {socket.error}
+              </div>
+            )}
+
+            {wallet.error && (
+              <div className="mt-4 px-4 py-3 rounded-lg text-center text-sm font-display tracking-wider" style={{ background: "rgba(255,58,107,0.12)", color: "#ff3a6b", border: "1px solid rgba(255,58,107,0.35)" }}>
+                {wallet.error}
+              </div>
+            )}
+
+            {walletActionError && (
+              <div className="mt-4 px-4 py-3 rounded-lg text-center text-sm font-display tracking-wider" style={{ background: "rgba(255,58,107,0.12)", color: "#ff3a6b", border: "1px solid rgba(255,58,107,0.35)" }}>
+                {walletActionError}
               </div>
             )}
 
@@ -291,7 +370,7 @@ function Index() {
               <>
             <button
               onClick={handleJoin}
-              disabled={insufficient}
+              disabled={balanceUnavailable || insufficient}
               className="mt-5 w-full py-5 rounded-xl font-display font-black tracking-[0.25em] text-lg text-[#0a0b0d] transition active:translate-y-0.5 disabled:cursor-not-allowed"
               style={insufficient ? {
                 background: "linear-gradient(180deg, #3a2027 0%, #2a161c 100%)",
@@ -302,11 +381,21 @@ function Index() {
                 boxShadow: "0 0 30px rgba(244,255,58,0.5), 0 6px 0 rgba(120,130,10,0.6), inset 0 1px 0 rgba(255,255,255,0.6)",
               }}
             >
-              {insufficient ? "⚠ INSUFFICIENT FUNDS" : "▶ JOIN GAME"}
+              {!wallet.connected
+                ? "CONNECT WALLET TO JOIN"
+                : balanceUnavailable
+                  ? "MATCH ENTRY COMING SOON"
+                  : insufficient
+                    ? "⚠ INSUFFICIENT FUNDS"
+                    : "▶ JOIN GAME"}
             </button>
             <div className="mt-3 text-[11px] text-center font-display tracking-wider" style={{ color: insufficient ? "#ff3a6b" : "rgba(255,255,255,0.5)" }}>
-              {insufficient
-                ? `Balance ${formatUSD(wallet.balance)} · Need ${formatUSD(wager)} to enter`
+              {!wallet.connected
+                ? "Connect your wallet to enter the arena"
+                : balanceUnavailable
+                  ? "Wallet sign-in is ready. Paid matches open when deposits are enabled."
+                  : insufficient
+                  ? `Balance ${formatUSD(wallet.balance)} · Need ${formatUSD(wager)} to enter`
                 : (mode === "territory" ? "Conquer as much territory as possible and earn its value" : "NO TIME LIMIT · LAST PLAYER STANDING WINS")}
             </div>
               </>
