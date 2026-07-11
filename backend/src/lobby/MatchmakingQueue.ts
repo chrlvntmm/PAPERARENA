@@ -6,6 +6,7 @@ export interface QueueEntry {
   username: string;
   color: string;
   joinedAt: number;
+  identityKey: string;
 }
 
 export interface LockedLobby {
@@ -28,33 +29,66 @@ export class MatchmakingQueue {
     username: string,
     color: string,
   ): LockedLobby | null {
-    this.leave(session);
     const key = queueKey(arena, wager);
-    const bucket = this.buckets.get(key) ?? [];
-    if (bucket.some((e) => e.session.id === session.id)) return null;
+    const identityKey = queueIdentity(session);
 
-    bucket.push({ session, username, color, joinedAt: Date.now() });
+    this.leaveByIdentity(identityKey, session.id);
+
+    const bucket = this.buckets.get(key) ?? [];
+
+    bucket.push({ session, username, color, joinedAt: Date.now(), identityKey });
     this.buckets.set(key, bucket);
 
     const needed = CONFIG.ARENAS[arena].players;
-    this.broadcastQueueUpdate(key, bucket, needed);
-
     if (bucket.length >= needed) {
-      const players = bucket.splice(0, needed);
+      const players = bucket.splice(bucket.length - needed, needed);
       this.buckets.set(key, bucket);
+      this.broadcastQueueUpdate(key, bucket, needed);
+      this.broadcastLockedUpdate(key, players, needed);
       return { arena, wager, players };
     }
+
+    this.broadcastQueueUpdate(key, bucket, needed);
     return null;
   }
 
   leave(session: ClientSession) {
+    this.leaveBySessionId(session.id);
+  }
+
+  private leaveBySessionId(sessionId: string) {
     for (const [key, bucket] of this.buckets) {
-      const idx = bucket.findIndex((e) => e.session.id === session.id);
+      const idx = bucket.findIndex((e) => e.session.id === sessionId);
       if (idx >= 0) {
         bucket.splice(idx, 1);
         const arena = key.split(":")[0] as ArenaType;
         const needed = CONFIG.ARENAS[arena].players;
         this.broadcastQueueUpdate(key, bucket, needed);
+        if (bucket.length === 0) {
+          this.buckets.delete(key);
+        }
+      }
+    }
+  }
+
+  private leaveByIdentity(identityKey: string, replacementSessionId?: string) {
+    for (const [key, bucket] of this.buckets) {
+      const idx = bucket.findIndex((e) => e.identityKey === identityKey);
+      if (idx >= 0) {
+        const [removed] = bucket.splice(idx, 1);
+        if (replacementSessionId && removed.session.id !== replacementSessionId) {
+          removed.session.send({
+            type: "error",
+            code: "QUEUE_REPLACED",
+            message: "This wallet joined matchmaking from another tab.",
+          });
+        }
+        const arena = key.split(":")[0] as ArenaType;
+        const needed = CONFIG.ARENAS[arena].players;
+        this.broadcastQueueUpdate(key, bucket, needed);
+        if (bucket.length === 0) {
+          this.buckets.delete(key);
+        }
       }
     }
   }
@@ -71,4 +105,21 @@ export class MatchmakingQueue {
       });
     });
   }
+
+  private broadcastLockedUpdate(key: string, players: QueueEntry[], needed: number) {
+    const [arena, wagerStr] = key.split(":");
+    players.forEach((entry) => {
+      entry.session.send({
+        type: "queue_update",
+        position: needed,
+        needed,
+        arena,
+        wager: Number(wagerStr),
+      });
+    });
+  }
+}
+
+function queueIdentity(session: ClientSession) {
+  return session.walletId ?? session.walletAddress ?? session.userId ?? session.id;
 }

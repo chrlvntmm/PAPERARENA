@@ -43,6 +43,7 @@ export interface GameSnapshot {
   cols: number;
   rows: number;
   tick: number;
+  tickMs: number;
   timeRemainingMs: number;
   totalPot: number;
   wager: number;

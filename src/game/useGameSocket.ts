@@ -19,7 +19,13 @@ export function useGameSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const seqRef = useRef(0);
   const pendingJoinRef = useRef<PendingJoin | null>(null);
-  const authPromiseRef = useRef<{ resolve: () => void; reject: (err: Error) => void } | null>(null);
+  const authenticatedRef = useRef(false);
+  const lastAuthErrorRef = useRef<string | null>(null);
+  const authPromiseRef = useRef<{
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timeoutId: ReturnType<typeof window.setTimeout>;
+  } | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
@@ -42,9 +48,14 @@ export function useGameSocket() {
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
       case "auth_ok":
+        authenticatedRef.current = true;
+        lastAuthErrorRef.current = null;
         setAuthenticated(true);
         setSessionId(msg.sessionId);
         setError(null);
+        if (authPromiseRef.current) {
+          window.clearTimeout(authPromiseRef.current.timeoutId);
+        }
         authPromiseRef.current?.resolve();
         authPromiseRef.current = null;
         if (pendingJoinRef.current) {
@@ -60,7 +71,13 @@ export function useGameSocket() {
         }
         break;
       case "auth_fail":
+        authenticatedRef.current = false;
+        lastAuthErrorRef.current = msg.reason;
+        setAuthenticated(false);
         setError(msg.reason);
+        if (authPromiseRef.current) {
+          window.clearTimeout(authPromiseRef.current.timeoutId);
+        }
         authPromiseRef.current?.reject(new Error(msg.reason));
         authPromiseRef.current = null;
         break;
@@ -89,6 +106,14 @@ export function useGameSocket() {
         break;
       case "error":
         setError(msg.message);
+        if (msg.code === "QUEUE_REPLACED") {
+          pendingJoinRef.current = null;
+          setQueuePosition(null);
+          setQueueNeeded(null);
+          setMatchId(null);
+          setPlayerId(null);
+          setSnapshot(null);
+        }
         break;
       case "pong":
         break;
@@ -96,10 +121,14 @@ export function useGameSocket() {
   }, [send]);
 
   const connect = useCallback(() => {
+    setError(null);
+    lastAuthErrorRef.current = null;
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
 
+    authenticatedRef.current = false;
+    setAuthenticated(false);
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
@@ -118,42 +147,67 @@ export function useGameSocket() {
     };
 
     ws.onclose = () => {
+      authenticatedRef.current = false;
       setConnected(false);
       setAuthenticated(false);
       wsRef.current = null;
+      if (authPromiseRef.current) {
+        window.clearTimeout(authPromiseRef.current.timeoutId);
+        authPromiseRef.current.reject(new Error("Arena connection closed before authentication."));
+        authPromiseRef.current = null;
+      }
     };
 
     ws.onerror = () => {
+      lastAuthErrorRef.current = "WebSocket connection failed";
       setError("WebSocket connection failed");
     };
   }, [handleMessage]);
 
   const waitForAuth = useCallback(() => {
-    if (authenticated) return Promise.resolve();
+    if (authenticatedRef.current) return Promise.resolve();
+    if (lastAuthErrorRef.current) return Promise.reject(new Error(lastAuthErrorRef.current));
     return new Promise<void>((resolve, reject) => {
-      authPromiseRef.current = { resolve, reject };
+      if (authPromiseRef.current) {
+        window.clearTimeout(authPromiseRef.current.timeoutId);
+      }
+      const waiter = {
+        resolve,
+        reject,
+        timeoutId: 0 as ReturnType<typeof window.setTimeout>,
+      };
+      waiter.timeoutId = window.setTimeout(() => {
+        if (authPromiseRef.current !== waiter) return;
+        authPromiseRef.current = null;
+        reject(new Error("Arena connection took too long to authenticate. Please try again."));
+      }, 8000);
+      authPromiseRef.current = waiter;
     });
-  }, [authenticated]);
+  }, []);
 
   const joinQueue = useCallback(
     (arena: "standard" | "mega", wager: number, username: string, color: string) => {
+      setError(null);
+      setQueuePosition(null);
+      setQueueNeeded(null);
       setElimination(null);
       setMatchEnd(null);
       setMatchId(null);
       setPlayerId(null);
       setSnapshot(null);
-      if (authenticated) {
+      if (authenticatedRef.current) {
         send({ type: "join_queue", arena, wager, username, color });
       } else {
         pendingJoinRef.current = { arena, wager, username, color };
       }
     },
-    [authenticated, send],
+    [send],
   );
 
   const leaveQueue = useCallback(() => {
     pendingJoinRef.current = null;
     send({ type: "leave_queue" });
+    setError(null);
     setQueuePosition(null);
     setQueueNeeded(null);
   }, [send]);
@@ -179,6 +233,8 @@ export function useGameSocket() {
     leaveQueue();
     wsRef.current?.close();
     wsRef.current = null;
+    authenticatedRef.current = false;
+    lastAuthErrorRef.current = null;
     setConnected(false);
     setAuthenticated(false);
     setSessionId(null);
@@ -187,6 +243,11 @@ export function useGameSocket() {
   useEffect(() => {
     return () => {
       pendingJoinRef.current = null;
+      authenticatedRef.current = false;
+      lastAuthErrorRef.current = null;
+      if (authPromiseRef.current) {
+        window.clearTimeout(authPromiseRef.current.timeoutId);
+      }
       authPromiseRef.current?.reject(new Error("Disconnected"));
       authPromiseRef.current = null;
       wsRef.current?.close();

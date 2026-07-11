@@ -631,7 +631,7 @@ function triggerAbsorb(state: GameState, killer: Player, victim: Player, amount:
 
 // Advance bounty rolling counters, pulse timers, and absorption particles.
 // Call once per animation frame with dt in milliseconds.
-export function updateAnimations(state: GameState, dt: number) {
+export function updateAnimations(state: GameState, dt: number, territoryCounts?: number[]) {
   for (const p of state.players) {
     if (p.bountyAnim) {
       p.bountyAnim.elapsed += dt;
@@ -680,7 +680,7 @@ export function updateAnimations(state: GameState, dt: number) {
   // whenever a player captures (or loses) territory.
   if (state.mode === "territory") {
     const total = state.cols * state.rows;
-    const counts = getTerritoryCounts(state);
+    const counts = territoryCounts ?? getTerritoryCounts(state);
     const k = 1 - Math.exp(-dt / 160); // ~160ms time-constant ease
     for (const p of state.players) {
       const target = (counts[p.id] / total) * state.totalMapValue;

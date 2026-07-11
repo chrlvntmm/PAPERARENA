@@ -37,6 +37,9 @@ interface AuthState {
   loading: boolean;
   error: string | null;
   balance: number | null;
+  nativeBalance: string | null;
+  nativeBalanceSymbol: string | null;
+  balanceLoading: boolean;
   connected: boolean;
   primaryWallet: AuthWallet | null;
   signIn: () => Promise<void>;
@@ -83,8 +86,45 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [balance, setBalanceState] = useState<number | null>(null);
+  const [nativeBalance, setNativeBalance] = useState<string | null>(null);
+  const [nativeBalanceSymbol, setNativeBalanceSymbol] = useState<string | null>(null);
+  const [nativeBalanceLoading, setNativeBalanceLoading] = useState(false);
 
   const primaryWallet = wallets[0] ?? null;
+
+  const refreshNativeBalance = useCallback(async (wallet: AuthWallet | null = primaryWallet) => {
+    if (!wallet) {
+      setNativeBalance(null);
+      setNativeBalanceSymbol(null);
+      return;
+    }
+
+    setNativeBalanceLoading(true);
+    try {
+      const res = await api(`/wallet/balance?walletId=${encodeURIComponent(wallet.id)}`, { method: "GET" });
+      if (!res.ok) {
+        const payload = await safeJson(res);
+        throw new Error(payload?.message ?? "Could not refresh wallet balance.");
+      }
+      const payload = (await res.json()) as {
+        chainType: ChainType;
+        chainId: string;
+        address: string;
+        balance: string;
+        symbol: string;
+        rawValue: string;
+      };
+      console.log("[TEMP wallet balance]", payload);
+      setNativeBalance(trimBalance(payload.balance));
+      setNativeBalanceSymbol(payload.symbol);
+    } catch (err) {
+      setNativeBalance(null);
+      setNativeBalanceSymbol(null);
+      setError(err instanceof Error ? err.message : "Could not refresh wallet balance.");
+    } finally {
+      setNativeBalanceLoading(false);
+    }
+  }, [primaryWallet]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -93,6 +133,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (res.status === 401) {
         setUser(null);
         setWallets([]);
+        setNativeBalance(null);
+        setNativeBalanceSymbol(null);
         setError(null);
         return;
       }
@@ -101,12 +143,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setUser(payload.user);
       setWallets(payload.wallets);
       setError(null);
+      await refreshNativeBalance(payload.wallets[0] ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load session.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshNativeBalance]);
 
   useEffect(() => {
     void refresh();
@@ -175,6 +218,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setWallets([]);
     setBalanceState(null);
+    setNativeBalance(null);
+    setNativeBalanceSymbol(null);
   }, [disconnectAsync, evmAccount.isConnected]);
 
   const setBalance = (n: number) => setBalanceState(n);
@@ -193,6 +238,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       loading,
       error,
       balance,
+      nativeBalance,
+      nativeBalanceSymbol,
+      balanceLoading: nativeBalanceLoading,
       connected: !!user,
       primaryWallet,
       signIn,
@@ -221,6 +269,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       loading,
       error,
       balance,
+      nativeBalance,
+      nativeBalanceSymbol,
+      nativeBalanceLoading,
       primaryWallet,
       signIn,
       signInEvm,
@@ -302,4 +353,20 @@ export function formatUSD(n: number | null) {
 export function formatSOL(usd: number | null) {
   if (usd == null) return "0.00 USD";
   return `${usd.toFixed(2)} USD`;
+}
+
+export function formatNativeBalance(amount: string | null, symbol: string | null) {
+  if (!amount || !symbol) return "0.0000";
+  return `${amount} ${symbol}`;
+}
+
+function trimBalance(value: string) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return value;
+  if (n === 0) return "0.0000";
+  if (n < 0.0001) return "<0.0001";
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 6,
+  });
 }

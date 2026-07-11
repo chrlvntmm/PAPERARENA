@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+function optionalUrl() {
+  return z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().url().optional(),
+  );
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]),
   PORT: z.coerce.number().int().positive().optional(),
@@ -23,10 +30,14 @@ const envSchema = z.object({
   AUTH_CHALLENGE_TTL_SECONDS: z.coerce.number().int().positive(),
   AUTH_COOKIE_SECURE: z.enum(["true", "false"]),
   AUTH_COOKIE_SAME_SITE: z.enum(["strict", "lax", "none"]),
+  ETH_RPC_URL: optionalUrl(),
+  SEPOLIA_RPC_URL: optionalUrl(),
+  SOLANA_RPC_URL: optionalUrl(),
   SOLANA_AUTH_BYPASS: z.enum(["true", "false"]).optional(),
   ESCROW_BYPASS: z.enum(["true", "false"]).optional(),
   AUTH_DEV_BYPASS: z.enum(["true", "false"]).optional(),
   LOGIC_TICK_MS: z.coerce.number().int().positive(),
+  MOVEMENT_TICKS_PER_STEP: z.coerce.number().int().positive(),
   BROADCAST_HZ: z.coerce.number().int().positive(),
   PRE_MATCH_COUNTDOWN_MS: z.coerce.number().int().nonnegative(),
   DISCONNECT_GRACE_MS: z.coerce.number().int().nonnegative(),
@@ -135,7 +146,13 @@ export const CONFIG = {
     COOKIE_SECURE: env.AUTH_COOKIE_SECURE === "true",
     COOKIE_SAME_SITE: env.AUTH_COOKIE_SAME_SITE,
   },
+  RPC: {
+    ETHEREUM_MAINNET_URL: env.ETH_RPC_URL,
+    SEPOLIA_URL: env.SEPOLIA_RPC_URL,
+    SOLANA_URL: env.SOLANA_RPC_URL,
+  },
   LOGIC_TICK_MS: env.LOGIC_TICK_MS,
+  MOVEMENT_TICKS_PER_STEP: env.MOVEMENT_TICKS_PER_STEP,
   BROADCAST_HZ: env.BROADCAST_HZ,
   BROADCAST_MS: 1000 / env.BROADCAST_HZ,
   PRE_MATCH_COUNTDOWN_MS: env.PRE_MATCH_COUNTDOWN_MS,

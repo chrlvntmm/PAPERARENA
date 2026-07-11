@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { updateAnimations, getTerritoryCounts, type Dir, type GameState } from "./engine";
-import { applySnapshot, createRenderState } from "./applySnapshot";
+import { updateAnimations, type Dir, type GameState } from "./engine";
+import { applySnapshot, b64ToInt8, createRenderState } from "./applySnapshot";
 import type { EliminationPayload, GameSnapshot, MatchEndPayload } from "./protocol";
 import { playClickSound, playLoseSound, playWinSound } from "@/lib/audio";
 import { Clock, Skull, Eye } from "lucide-react";
@@ -26,9 +26,17 @@ const KEY_MAP: Record<string, Dir> = {
 
 // Constant tactical zoom — cell size in CSS pixels during play.
 const PLAY_CELL = 22;
-const LOGIC_TICK_MS = 80;
-
 type Interp = { fx: number; fy: number };
+
+function getSnapshotTerritoryCounts(snapshot: GameSnapshot, playerCount: number) {
+  const territory = b64ToInt8(snapshot.territoryB64);
+  const counts = new Array<number>(playerCount).fill(0);
+  for (let i = 0; i < territory.length; i++) {
+    const owner = territory[i];
+    if (owner >= 0 && owner < playerCount) counts[owner]++;
+  }
+  return counts;
+}
 
 export default function Game({
   playerId,
@@ -55,6 +63,7 @@ export default function Game({
   const lastTickRef = useRef(-1);
   const lastSnapshotAtRef = useRef(performance.now());
   const interpAlphaRef = useRef(0);
+  const territoryCountsRef = useRef<number[]>([]);
 
   const [, force] = useState(0);
   const [spectating, setSpectating] = useState(false);
@@ -82,6 +91,11 @@ export default function Game({
       winSoundPlayedRef.current = true;
       playWinSound();
     }
+    if (matchEnd) {
+      spectatingRef.current = false;
+      setSpectating(false);
+      setShowLostModal(false);
+    }
   }, [matchEnd]);
 
   useEffect(() => {
@@ -96,6 +110,7 @@ export default function Game({
     winSoundPlayedRef.current = false;
     prevPosRef.current = new Map(state.players.map((p) => [p.id, { x: p.x, y: p.y }]));
     interpRef.current = new Map(state.players.map((p) => [p.id, { fx: p.x, fy: p.y }]));
+    territoryCountsRef.current = getSnapshotTerritoryCounts(snapshot, state.players.length);
 
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
@@ -166,14 +181,15 @@ export default function Game({
           prevPosRef.current.set(p.id, { x: p.x, y: p.y });
         }
         applySnapshot(state, snap, playerId);
+        territoryCountsRef.current = getSnapshotTerritoryCounts(snap, state.players.length);
         lastTickRef.current = snap.tick;
         lastSnapshotAtRef.current = now;
         interpAlphaRef.current = 0;
       } else {
-        interpAlphaRef.current = Math.min(1, (now - lastSnapshotAtRef.current) / LOGIC_TICK_MS);
+        interpAlphaRef.current = Math.min(1, (now - lastSnapshotAtRef.current) / snap.tickMs);
       }
 
-      updateAnimations(state, dt);
+      updateAnimations(state, dt, territoryCountsRef.current);
 
       const alpha = interpAlphaRef.current;
       for (const p of state.players) {
@@ -205,7 +221,7 @@ export default function Game({
 
       render(ctx, state, viewRef.current, interpRef.current);
 
-      if (hudAcc > 100) {
+      if (hudAcc > 200) {
         hudAcc = 0;
         force((v) => v + 1);
       }
@@ -224,7 +240,7 @@ export default function Game({
   const me = state?.players[playerId];
   const alivePlayers = state ? state.players.filter((p) => p.alive) : [];
   const isTerritory = state?.mode === "territory";
-  const territoryCounts = state ? getTerritoryCounts(state) : [];
+  const territoryCounts = state ? territoryCountsRef.current : [];
   const totalCells = state ? state.cols * state.rows : 1;
   const valueFor = (id: number) => (state ? (territoryCounts[id] / totalCells) * state.totalMapValue : 0);
   const pctFor = (id: number) => (state ? (territoryCounts[id] / totalCells) * 100 : 0);
@@ -385,9 +401,9 @@ export default function Game({
           const ultra = matchEnd.ultra && isHumanWin;
           const winnerColor = me?.color ?? "#f4ff3a";
           return (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md p-6">
+            <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md p-3 sm:p-6">
               <div
-                className="rounded-[36px] px-8 py-10 border max-w-[420px] w-full"
+                className="rounded-[28px] sm:rounded-[36px] px-4 sm:px-8 py-8 sm:py-10 border max-w-[min(92vw,460px)] w-full overflow-hidden"
                 style={{
                   background: "#0a0b0d",
                   borderColor: "rgba(244,255,58,0.55)",
@@ -404,12 +420,20 @@ export default function Game({
                     </div>
                   )}
                   <div
-                    className="font-display text-5xl md:text-6xl mb-3"
-                    style={{ color: isHumanWin ? "#f4ff3a" : winnerColor, textShadow: `0 0 18px ${isHumanWin ? "rgba(244,255,58,0.85)" : winnerColor}, 0 0 42px ${isHumanWin ? "rgba(244,255,58,0.55)" : "rgba(255,255,255,0.2)"}`, letterSpacing: "0.08em" }}
+                    className="font-display mb-3 max-w-full px-1"
+                    style={{
+                      color: isHumanWin ? "#f4ff3a" : winnerColor,
+                      textShadow: `0 0 18px ${isHumanWin ? "rgba(244,255,58,0.85)" : winnerColor}, 0 0 42px ${isHumanWin ? "rgba(244,255,58,0.55)" : "rgba(255,255,255,0.2)"}`,
+                      fontSize: "clamp(2.25rem, 10vw, 3.75rem)",
+                      lineHeight: 0.95,
+                      letterSpacing: "0.04em",
+                      overflowWrap: "anywhere",
+                      wordBreak: "normal",
+                    }}
                   >
                     {isHumanWin ? "VICTORY" : `${matchEnd.winnerName} WINS`}
                   </div>
-                  <div className="font-display text-xs md:text-sm tracking-[0.3em] text-white mb-8">
+                  <div className="font-display text-[11px] md:text-sm tracking-[0.22em] md:tracking-[0.3em] text-white mb-8 px-1">
                     {isHumanWin
                       ? (ultra
                           ? <>YOU CONQUERED <span style={{ color: "#f4ff3a", textShadow: "0 0 10px rgba(244,255,58,0.7)" }}>100%</span> OF MAP</>
@@ -443,7 +467,7 @@ export default function Game({
                     value={`$${matchEnd.mapValue.toFixed(2)}`}
                   />
                   <StatRow
-                    twoLine={["YOUR PRICE", "- PLATFORM FEE (5%)"]}
+                    twoLine={["YOUR PRIZE", "- PLATFORM FEE (5%)"]}
                     value={`$${matchEnd.netPayout.toFixed(2)}`}
                     valueColor="#f4ff3a"
                     valueShadow="0 0 14px rgba(244,255,58,0.7)"
@@ -604,20 +628,20 @@ function StatRow({
   last?: boolean;
 }) {
   return (
-    <div className={`flex items-center justify-between gap-4 py-3 ${last ? "" : "border-b border-white/[0.06]"}`}>
+    <div className={`flex items-center justify-between gap-3 py-3 ${last ? "" : "border-b border-white/[0.06]"}`}>
       <div className="flex items-center gap-2 min-w-0">
         {twoLine ? (
-          <div className="flex flex-col leading-tight">
-            <span className="font-display text-[10px] tracking-[0.25em] text-white">{twoLine[0]}</span>
-            <span className="font-display text-[9px] tracking-[0.22em] text-white/55 mt-0.5">{twoLine[1]}</span>
+          <div className="flex flex-col leading-tight min-w-0">
+            <span className="font-display text-[10px] tracking-[0.18em] sm:tracking-[0.25em] text-white truncate">{twoLine[0]}</span>
+            <span className="font-display text-[9px] tracking-[0.14em] sm:tracking-[0.22em] text-white/55 mt-0.5 truncate">{twoLine[1]}</span>
           </div>
         ) : (
-          <span className="font-display text-[10px] tracking-[0.25em] text-white">{label}</span>
+          <span className="font-display text-[10px] tracking-[0.16em] sm:tracking-[0.25em] text-white truncate">{label}</span>
         )}
         {icon}
       </div>
       <span
-        className="font-display text-base tabular-nums"
+        className="font-display text-base tabular-nums shrink-0"
         style={{ color: valueColor ?? "#ffffff", textShadow: valueShadow }}
       >
         {value}
@@ -671,14 +695,6 @@ function render(
   const cellSize = view.cell;
   const W = view.w;
   const H = view.h;
-  // Precompute territory counts once per frame for territory mode labels.
-  const tCounts = new Array<number>(players.length).fill(0);
-  if (state.mode === "territory") {
-    const total = cols * rows;
-    for (let i = 0; i < total; i++) { const t = territory[i]; if (t >= 0) tCounts[t]++; }
-  }
-  const totalCells = cols * rows;
-
   ctx.fillStyle = "#0a0b0d";
   ctx.fillRect(0, 0, W, H);
 
@@ -713,34 +729,49 @@ function render(
     rows * cellSize,
   );
 
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const t = territory[y * cols + x];
-      if (t === -1) continue;
-      const c = players[t].color;
-      ctx.fillStyle = hexAlpha(c, 0.22);
-      ctx.fillRect(x * cellSize - camX, y * cellSize - camY, cellSize, cellSize);
-    }
-  }
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const id = territory[y * cols + x];
-      if (id === -1) continue;
-      const neighbors = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]];
-      for (const [nx, ny] of neighbors) {
-        const isOut = nx < 0 || ny < 0 || nx >= cols || ny >= rows || territory[ny * cols + nx] !== id;
-        if (isOut) {
-          ctx.strokeStyle = hexAlpha(players[id].color, 0.6);
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          if (nx === x + 1) { ctx.moveTo((x + 1) * cellSize - camX, y * cellSize - camY); ctx.lineTo((x + 1) * cellSize - camX, (y + 1) * cellSize - camY); }
-          else if (nx === x - 1) { ctx.moveTo(x * cellSize - camX, y * cellSize - camY); ctx.lineTo(x * cellSize - camX, (y + 1) * cellSize - camY); }
-          else if (ny === y + 1) { ctx.moveTo(x * cellSize - camX, (y + 1) * cellSize - camY); ctx.lineTo((x + 1) * cellSize - camX, (y + 1) * cellSize - camY); }
-          else if (ny === y - 1) { ctx.moveTo(x * cellSize - camX, y * cellSize - camY); ctx.lineTo((x + 1) * cellSize - camX, y * cellSize - camY); }
-          ctx.stroke();
+  for (const p of players) {
+    ctx.fillStyle = hexAlpha(p.color, 0.22);
+    ctx.beginPath();
+    for (let y = y0; y < y1; y++) {
+      const row = y * cols;
+      for (let x = x0; x < x1; x++) {
+        if (territory[row + x] === p.id) {
+          ctx.rect(x * cellSize - camX, y * cellSize - camY, cellSize, cellSize);
         }
       }
     }
+    ctx.fill();
+  }
+
+  ctx.lineWidth = 1;
+  for (const p of players) {
+    ctx.strokeStyle = hexAlpha(p.color, 0.6);
+    ctx.beginPath();
+    for (let y = y0; y < y1; y++) {
+      const row = y * cols;
+      for (let x = x0; x < x1; x++) {
+        if (territory[row + x] !== p.id) continue;
+        const sx = x * cellSize - camX;
+        const sy = y * cellSize - camY;
+        if (x + 1 >= cols || territory[row + x + 1] !== p.id) {
+          ctx.moveTo(sx + cellSize, sy);
+          ctx.lineTo(sx + cellSize, sy + cellSize);
+        }
+        if (x - 1 < 0 || territory[row + x - 1] !== p.id) {
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx, sy + cellSize);
+        }
+        if (y + 1 >= rows || territory[row + cols + x] !== p.id) {
+          ctx.moveTo(sx, sy + cellSize);
+          ctx.lineTo(sx + cellSize, sy + cellSize);
+        }
+        if (y - 1 < 0 || territory[row - cols + x] !== p.id) {
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + cellSize, sy);
+        }
+      }
+    }
+    ctx.stroke();
   }
 
   for (let y = y0; y < y1; y++) {

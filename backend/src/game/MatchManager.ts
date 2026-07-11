@@ -18,4 +18,11 @@ export class MatchManager {
     match?.destroy();
     this.matches.delete(id);
   }
+
+  destroyAll() {
+    for (const match of this.matches.values()) {
+      match.destroy();
+    }
+    this.matches.clear();
+  }
 }

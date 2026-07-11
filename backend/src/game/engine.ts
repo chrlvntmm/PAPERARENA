@@ -78,6 +78,9 @@ export interface GameConfig {
   username?: string;
   color?: string;
   mode?: GameMode;
+  tickMs?: number;
+  platformFee?: number;
+  matchDurationMs?: number;
 }
 
 export interface GameState {
@@ -230,11 +233,14 @@ export function buildGame(cfg: GameConfig): GameState {
   }
 
   const totalPot = cfg.players * cfg.wager;
-  const fee = totalPot * 0.05;
+  const tickMs = cfg.tickMs ?? 50;
+  const platformFee = cfg.platformFee ?? 0.02;
+  const matchDurationMs = cfg.matchDurationMs ?? (cfg.players <= 5 ? 150 * 1000 : 5 * 60 * 1000);
+  const fee = totalPot * platformFee;
   return {
     cols, rows, cellSize,
     territory, trailMap, players,
-    tickMs: 80,
+    tickMs,
     elapsed: 0,
     winnerId: null,
     finalPrize: totalPot - fee,
@@ -247,12 +253,12 @@ export function buildGame(cfg: GameConfig): GameState {
     displayHumanBountyStolen: 0,
     humanStolenAnim: null,
     mode: cfg.mode ?? "bounty",
-    // Gross map value = full pot. The 5% rake is applied at cash-out, not here.
+    // Gross map value = full pot. The platform fee is applied at cash-out, not here.
     totalMapValue: totalPot,
-    timeRemainingMs: cfg.players <= 5 ? 150 * 1000 : 5 * 60 * 1000,
+    timeRemainingMs: matchDurationMs,
     endedByTime: false,
     houseClaim: false,
-    matchDurationMs: cfg.players <= 5 ? 150 * 1000 : 5 * 60 * 1000,
+    matchDurationMs,
     humanDeathCause: null,
     deathEventsThisTick: [],
   };
@@ -474,6 +480,10 @@ export function tick(state: GameState) {
   // 5) win condition
   const alive = players.filter(p => p.alive);
   if (state.mode === "territory") {
+    if (alive.length === 1 && state.winnerId === null) {
+      state.winnerId = alive[0].id;
+      state.endedByTime = false;
+    }
     // Instant 100% map conquest -> immediate victory.
     if (state.winnerId === null) {
       const counts = getTerritoryCounts(state);
@@ -744,6 +754,19 @@ export function forceEliminate(state: GameState, playerId: number) {
     killerId: null,
   });
   killPlayer(state, p);
+  const alive = state.players.filter((player) => player.alive);
+  if (state.mode === "territory") {
+    if (alive.length === 1 && state.winnerId === null) {
+      state.winnerId = alive[0].id;
+      state.endedByTime = false;
+    } else if (alive.length === 0 && state.winnerId === null) {
+      state.winnerId = -1;
+      state.houseClaim = true;
+      state.endedByTime = false;
+    }
+  } else if (alive.length <= 1 && state.winnerId === null) {
+    state.winnerId = alive[0]?.id ?? -1;
+  }
 }
 
 function killPlayer(state: GameState, p: Player) {

@@ -3,7 +3,7 @@ import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useEffect, useRef, useState } from "react";
 import Game from "@/game/Game";
 import { useGameSocket } from "@/game/useGameSocket";
-import { useWallet, formatUSD, formatSOL } from "@/lib/wallet";
+import { useWallet, formatUSD, formatNativeBalance } from "@/lib/wallet";
 import { playClickSound, playWinSound, installAudioUnlock } from "@/lib/audio";
 
 export const Route = createFileRoute("/")({
@@ -24,9 +24,15 @@ const PLAYER_OPTIONS = [
 ];
 const WAGER_OPTIONS = [5, 10, 20];
 const PLATFORM_FEE = Number(import.meta.env.VITE_PLATFORM_FEE);
+const DEV_MATCH_ENTRY = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_MATCH_ENTRY === "true";
+const DEV_STANDARD_ARENA_PLAYERS = Number(import.meta.env.VITE_DEV_STANDARD_ARENA_PLAYERS);
 
 if (!Number.isFinite(PLATFORM_FEE)) {
   throw new Error("VITE_PLATFORM_FEE is required.");
+}
+
+if (DEV_MATCH_ENTRY && (!Number.isInteger(DEV_STANDARD_ARENA_PLAYERS) || DEV_STANDARD_ARENA_PLAYERS <= 0)) {
+  throw new Error("VITE_DEV_STANDARD_ARENA_PLAYERS is required when dev match entry is enabled.");
 }
 
 
@@ -50,10 +56,11 @@ function Index() {
   const [wager, setWager] = useState(10);
   const mode = "territory" as const;
   const [phase, setPhase] = useState<LobbyPhase>("idle");
-  const [username, setUsername] = useState("PLAYER_01");
+  const [username, setUsername] = useState(() => `PLAYER_${Math.floor(1000 + Math.random() * 9000)}`);
   const [skin, setSkin] = useState(SKIN_COLORS[0]);
   const [evmSignPending, setEvmSignPending] = useState(false);
   const [walletActionError, setWalletActionError] = useState<string | null>(null);
+  const [walletCopied, setWalletCopied] = useState(false);
   const joinPendingRef = useRef(false);
   const wagerDeductedRef = useRef(false);
 
@@ -86,16 +93,47 @@ function Index() {
     }
   }, [socket.matchId, socket.playerId, socket.snapshot]);
 
+  useEffect(() => {
+    if (!socket.error || phase !== "queueing") return;
+    joinPendingRef.current = false;
+    if (wagerDeductedRef.current) {
+      wallet.credit(wager);
+      wagerDeductedRef.current = false;
+    }
+    setPhase("idle");
+  }, [phase, socket.error, wager, wallet]);
+
   const totalPot = players * wager;
   const fee = totalPot * PLATFORM_FEE;
   const prize = totalPot - fee;
-  const balanceUnavailable = wallet.connected && wallet.balance == null;
-  const insufficient = wallet.connected && wallet.balance != null && wallet.balance < wager;
+  const balanceUnavailable = !DEV_MATCH_ENTRY && wallet.connected && wallet.balance == null;
+  const insufficient = !DEV_MATCH_ENTRY && wallet.connected && wallet.balance != null && wallet.balance < wager;
   const isQueueing = phase === "queueing";
   const arena = players === 5 ? "standard" as const : "mega" as const;
+  const expectedQueueNeeded =
+    socket.queueNeeded ??
+    (DEV_MATCH_ENTRY && arena === "standard" ? DEV_STANDARD_ARENA_PLAYERS : players);
   const walletLabel = wallet.primaryWallet
     ? `${wallet.primaryWallet.address.slice(0, 4)}...${wallet.primaryWallet.address.slice(-4)}`
     : "CONNECT WALLET";
+
+  const handleCopyWallet = async () => {
+    playClickSound();
+    if (!wallet.primaryWallet) return;
+    try {
+      await navigator.clipboard.writeText(wallet.primaryWallet.address);
+      setWalletCopied(true);
+      window.setTimeout(() => setWalletCopied(false), 1200);
+    } catch (err) {
+      setWalletActionError(err instanceof Error ? err.message : "Could not copy wallet address.");
+    }
+  };
+
+  const handleRefreshWallet = async () => {
+    playClickSound();
+    setWalletActionError(null);
+    await wallet.refresh();
+  };
 
   const handleJoin = async () => {
     playClickSound();
@@ -106,8 +144,10 @@ function Index() {
       return;
     }
     if (balanceUnavailable || insufficient || isQueueing) return;
-    if (!wallet.deduct(wager)) return;
-    wagerDeductedRef.current = true;
+    if (!DEV_MATCH_ENTRY) {
+      if (!wallet.deduct(wager)) return;
+      wagerDeductedRef.current = true;
+    }
     joinPendingRef.current = true;
     setPhase("queueing");
     socket.connect();
@@ -354,7 +394,7 @@ function Index() {
                   <span className="font-display text-xs tracking-[0.35em] text-[#f4ff3a]">SEARCHING FOR OPPONENTS</span>
                 </div>
                 <div className="font-display text-2xl font-black text-white tracking-wider mb-1">
-                  FINDING PLAYERS… {socket.queuePosition ?? 1}/{socket.queueNeeded ?? players}
+                  FINDING PLAYERS… {socket.queuePosition ?? 1}/{expectedQueueNeeded}
                 </div>
                 <div className="text-[11px] text-white/50 font-display tracking-wider mb-5">
                   {socket.connected ? "Connected to arena server" : "Connecting to arena server…"}
@@ -384,7 +424,7 @@ function Index() {
               {!wallet.connected
                 ? "CONNECT WALLET TO JOIN"
                 : balanceUnavailable
-                  ? "MATCH ENTRY COMING SOON"
+                  ? "DEPOSIT ENTRY COMING SOON"
                   : insufficient
                     ? "⚠ INSUFFICIENT FUNDS"
                     : "▶ JOIN GAME"}
@@ -396,7 +436,9 @@ function Index() {
                   ? "Wallet sign-in is ready. Paid matches open when deposits are enabled."
                   : insufficient
                   ? `Balance ${formatUSD(wallet.balance)} · Need ${formatUSD(wager)} to enter`
-                : (mode === "territory" ? "Conquer as much territory as possible and earn its value" : "NO TIME LIMIT · LAST PLAYER STANDING WINS")}
+                : DEV_MATCH_ENTRY
+                  ? "Local playtest mode. Deposits and payouts are not active."
+                  : (mode === "territory" ? "Conquer as much territory as possible and earn its value" : "NO TIME LIMIT · LAST PLAYER STANDING WINS")}
             </div>
               </>
             )}
@@ -411,13 +453,25 @@ function Index() {
                   <span className="font-display text-xl text-white tracking-wide">Wallet</span>
                 </div>
                 <div className="flex items-center gap-3 text-xs text-white/60">
-                  <button onClick={playClickSound} className="hover:text-white transition">⧉ Copy</button>
-                  <button onClick={playClickSound} className="hover:text-white transition">↻ Refresh</button>
+                  <button
+                    onClick={handleCopyWallet}
+                    disabled={!wallet.primaryWallet}
+                    className="hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {walletCopied ? "Copied" : "Copy"}
+                  </button>
+                  <button
+                    onClick={handleRefreshWallet}
+                    disabled={!wallet.connected || wallet.balanceLoading}
+                    className="hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {wallet.balanceLoading ? "Refreshing" : "Refresh"}
+                  </button>
                 </div>
               </div>
               <div className="text-center py-4">
-                <div className="font-display font-black text-5xl" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.5)" }}>{formatUSD(wallet.balance)}</div>
-                <div className="text-white/60 font-mono text-sm mt-1">{formatSOL(wallet.balance)}</div>
+                <div className="font-display font-black text-5xl" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.5)" }}>{formatNativeBalance(wallet.nativeBalance, wallet.nativeBalanceSymbol)}</div>
+                <div className="text-white/60 font-mono text-sm mt-1">{wallet.primaryWallet ? walletLabel : "Wallet not connected"}</div>
               </div>
               <div className="grid grid-cols-2 gap-3 mt-2">
                 <button

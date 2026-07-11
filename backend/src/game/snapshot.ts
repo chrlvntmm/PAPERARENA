@@ -35,6 +35,7 @@ export function buildSnapshot(
     cols: state.cols,
     rows: state.rows,
     tick: state.elapsed,
+    tickMs: state.tickMs,
     timeRemainingMs: state.timeRemainingMs,
     totalPot: state.totalPot,
     wager: state.totalPot / state.players.length,

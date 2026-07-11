@@ -11,6 +11,7 @@ import {
   type RequestFingerprint,
 } from "../auth/auth.service.js";
 import { enforceRateLimit } from "./rate-limit.js";
+import { getWalletBalance } from "../wallet/balance.service.js";
 
 const challengeSchema = z.object({
   chainType: z.enum(["solana", "evm"]),
@@ -72,6 +73,32 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       return true;
     }
     json(res, 200, publicIdentity(identity));
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/wallet/balance") {
+    const identity = await authenticateSessionToken(getSessionTokenFromCookie(req));
+    if (!identity) {
+      json(res, 401, { error: "UNAUTHENTICATED", message: "No active session." });
+      return true;
+    }
+
+    const walletId = url.searchParams.get("walletId");
+    const wallet = walletId
+      ? identity.wallets.find((candidate) => candidate.id === walletId)
+      : identity.wallets[0];
+
+    if (!wallet) {
+      json(res, 404, { error: "WALLET_NOT_FOUND", message: "No verified wallet found for this session." });
+      return true;
+    }
+
+    try {
+      json(res, 200, await getWalletBalance(wallet));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not refresh wallet balance.";
+      json(res, 502, { error: "BALANCE_UNAVAILABLE", message });
+    }
     return true;
   }
 

@@ -23,6 +23,7 @@ export class Match {
   private playerToSession = new Map<number, string>();
   private pendingInputs = new Map<number, Dir>();
   private logicAcc = 0;
+  private movementTickAcc = 0;
   private lastBroadcast = 0;
   private interval: ReturnType<typeof setInterval> | null = null;
   private destroyed = false;
@@ -44,14 +45,18 @@ export class Match {
       players: cfg.players,
       wager,
       mode: "territory",
+      tickMs: CONFIG.LOGIC_TICK_MS * CONFIG.MOVEMENT_TICKS_PER_STEP,
+      platformFee: CONFIG.PLATFORM_FEE,
+      matchDurationMs: cfg.durationMs,
     });
 
     this.state.matchDurationMs = cfg.durationMs;
     this.state.timeRemainingMs = cfg.durationMs;
 
+    const nameCounts = new Map<string, number>();
     entries.forEach((entry, i) => {
       const p = this.state.players[i];
-      p.name = entry.username.slice(0, 16);
+      p.name = uniqueMatchName(entry.username, nameCounts);
       p.color = entry.color;
       p.isHuman = true;
 
@@ -119,8 +124,14 @@ export class Match {
       s.timeRemainingMs = Math.max(0, s.timeRemainingMs - CONFIG.LOGIC_TICK_MS);
       if (s.timeRemainingMs <= 0) {
         endTerritoryMatch(s);
+        this.endMatch();
+        return;
       }
     }
+
+    this.movementTickAcc += 1;
+    if (this.movementTickAcc < CONFIG.MOVEMENT_TICKS_PER_STEP) return;
+    this.movementTickAcc = 0;
 
     const preCounts = getTerritoryCounts(s);
     for (const p of s.players) {
@@ -271,6 +282,7 @@ export class Match {
     this.destroyed = true;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
+    this.movementTickAcc = 0;
     for (const timer of this.disconnectTimers.values()) clearTimeout(timer);
     this.disconnectTimers.clear();
     this.pendingInputs.clear();
@@ -280,4 +292,14 @@ export class Match {
     this.preDeathCounts.clear();
     this.onEnd?.();
   }
+}
+
+function uniqueMatchName(rawName: string, counts: Map<string, number>) {
+  const base = (rawName.trim() || "PLAYER").slice(0, 16);
+  const count = (counts.get(base) ?? 0) + 1;
+  counts.set(base, count);
+  if (count === 1) return base;
+
+  const suffix = `_${count}`;
+  return `${base.slice(0, 16 - suffix.length)}${suffix}`;
 }
