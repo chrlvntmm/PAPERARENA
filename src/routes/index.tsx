@@ -56,7 +56,7 @@ function Index() {
   const [wager, setWager] = useState(10);
   const mode = "territory" as const;
   const [phase, setPhase] = useState<LobbyPhase>("idle");
-  const [username, setUsername] = useState(() => `PLAYER_${Math.floor(1000 + Math.random() * 9000)}`);
+  const [username, setUsername] = useState("PLAYER");
   const [skin, setSkin] = useState(SKIN_COLORS[0]);
   const [evmSignPending, setEvmSignPending] = useState(false);
   const [walletActionError, setWalletActionError] = useState<string | null>(null);
@@ -65,6 +65,10 @@ function Index() {
   const wagerDeductedRef = useRef(false);
 
   useEffect(() => { installAudioUnlock(); }, []);
+
+  useEffect(() => {
+    setUsername(`PLAYER_${Math.floor(1000 + Math.random() * 9000)}`);
+  }, []);
 
   useEffect(() => {
     if (!evmSignPending || wallet.connected || !wallet.evmWalletReady) return;
@@ -106,8 +110,6 @@ function Index() {
   const totalPot = players * wager;
   const fee = totalPot * PLATFORM_FEE;
   const prize = totalPot - fee;
-  const balanceUnavailable = !DEV_MATCH_ENTRY && wallet.connected && wallet.balance == null;
-  const insufficient = !DEV_MATCH_ENTRY && wallet.connected && wallet.balance != null && wallet.balance < wager;
   const isQueueing = phase === "queueing";
   const arena = players === 5 ? "standard" as const : "mega" as const;
   const expectedQueueNeeded =
@@ -143,11 +145,7 @@ function Index() {
       wallet.openEvmPicker();
       return;
     }
-    if (balanceUnavailable || insufficient || isQueueing) return;
-    if (!DEV_MATCH_ENTRY) {
-      if (!wallet.deduct(wager)) return;
-      wagerDeductedRef.current = true;
-    }
+    if (isQueueing) return;
     joinPendingRef.current = true;
     setPhase("queueing");
     socket.connect();
@@ -410,32 +408,20 @@ function Index() {
               <>
             <button
               onClick={handleJoin}
-              disabled={balanceUnavailable || insufficient}
+              disabled={isQueueing}
               className="mt-5 w-full py-5 rounded-xl font-display font-black tracking-[0.25em] text-lg text-[#0a0b0d] transition active:translate-y-0.5 disabled:cursor-not-allowed"
-              style={insufficient ? {
-                background: "linear-gradient(180deg, #3a2027 0%, #2a161c 100%)",
-                color: "#ff3a6b",
-                boxShadow: "inset 0 0 12px rgba(255,58,107,0.25)",
-              } : {
+              style={{
                 background: "linear-gradient(180deg, #fff96a 0%, #f4ff3a 50%, #d4dd1f 100%)",
                 boxShadow: "0 0 30px rgba(244,255,58,0.5), 0 6px 0 rgba(120,130,10,0.6), inset 0 1px 0 rgba(255,255,255,0.6)",
               }}
             >
               {!wallet.connected
                 ? "CONNECT WALLET TO JOIN"
-                : balanceUnavailable
-                  ? "DEPOSIT ENTRY COMING SOON"
-                  : insufficient
-                    ? "⚠ INSUFFICIENT FUNDS"
-                    : "▶ JOIN GAME"}
+                : "▶ JOIN GAME"}
             </button>
-            <div className="mt-3 text-[11px] text-center font-display tracking-wider" style={{ color: insufficient ? "#ff3a6b" : "rgba(255,255,255,0.5)" }}>
+            <div className="mt-3 text-[11px] text-center font-display tracking-wider text-white/50">
               {!wallet.connected
                 ? "Connect your wallet to enter the arena"
-                : balanceUnavailable
-                  ? "Wallet sign-in is ready. Paid matches open when deposits are enabled."
-                  : insufficient
-                  ? `Balance ${formatUSD(wallet.balance)} · Need ${formatUSD(wager)} to enter`
                 : DEV_MATCH_ENTRY
                   ? "Local playtest mode. Deposits and payouts are not active."
                   : (mode === "territory" ? "Conquer as much territory as possible and earn its value" : "NO TIME LIMIT · LAST PLAYER STANDING WINS")}
