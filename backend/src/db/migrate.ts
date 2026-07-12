@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import pg from "pg";
 import { CONFIG } from "../config.js";
@@ -14,10 +15,17 @@ const client = new Client({
 
 try {
   await client.connect();
-  const migrationPath = join(process.cwd(), "migrations", "001_auth.sql");
-  const sql = await readFile(migrationPath, "utf8");
-  await client.query(sql);
-  console.log("Applied migration: 001_auth.sql");
+  const migrationsDir = join(process.cwd(), "migrations");
+  const files = (await readdir(migrationsDir))
+    .filter((file) => file.endsWith(".sql"))
+    .sort((a, b) => a.localeCompare(b));
+
+  for (const file of files) {
+    const migrationPath = join(migrationsDir, file);
+    const sql = await readFile(migrationPath, "utf8");
+    await client.query(sql);
+    console.log(`Applied migration: ${file}`);
+  }
 } finally {
   await client.end();
 }

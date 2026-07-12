@@ -5,14 +5,17 @@ import {
   createRootRouteWithContext,
   useRouter,
   HeadContent,
+  ClientOnly,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
-import { WalletProvider } from "../lib/wallet";
-import { WalletKitProvider } from "../lib/wallet-kit";
+
+const ClientWalletApp = lazy(() =>
+  import("../lib/client-wallet-app.client").then((module) => ({ default: module.ClientWalletApp })),
+);
 
 function NotFoundComponent() {
   return (
@@ -72,10 +75,24 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
   return (
-    <WalletKitProvider queryClient={queryClient}>
-      <WalletProvider>
-        <Outlet />
-      </WalletProvider>
-    </WalletKitProvider>
+    <ClientOnly fallback={<AppLoading />}>
+      <Suspense fallback={<AppLoading />}>
+        <ClientWalletApp queryClient={queryClient}>
+          <Outlet />
+        </ClientWalletApp>
+      </Suspense>
+    </ClientOnly>
+  );
+}
+
+function AppLoading() {
+  return (
+    <main className="min-h-screen bg-background">
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <div className="font-display text-sm font-bold uppercase tracking-[0.3em] text-muted-foreground">
+          Loading PaperArena
+        </div>
+      </div>
+    </main>
   );
 }

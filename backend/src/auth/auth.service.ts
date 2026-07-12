@@ -240,6 +240,23 @@ export async function revokeSession(rawSessionToken: string | undefined) {
   await db.revokeSession(hmacToken(rawSessionToken));
 }
 
+export async function updateUserDisplayName(identity: AuthenticatedIdentity, displayName: string) {
+  const normalized = normalizeDisplayName(displayName);
+
+  try {
+    const user = await db.updateUserDisplayName(identity.user.id, normalized, new Date());
+    if (!user) {
+      throw new Error("User unavailable.");
+    }
+    return publicUser(user);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new Error("Username is already taken.");
+    }
+    throw error;
+  }
+}
+
 export function publicUser(user: UserDocument) {
   return {
     id: user.id,
@@ -267,6 +284,21 @@ export function publicIdentity(identity: AuthenticatedIdentity) {
       expiresAt: identity.session.expiresAt.toISOString(),
     },
   };
+}
+
+function normalizeDisplayName(displayName: string) {
+  const normalized = displayName.trim().toUpperCase();
+  if (!/^[A-Z0-9_]{3,16}$/.test(normalized)) {
+    throw new Error("Username must be 3-16 characters using letters, numbers, or underscore.");
+  }
+  return normalized;
+}
+
+function isUniqueViolation(error: unknown) {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505";
 }
 
 async function writeAuditLog(args: {

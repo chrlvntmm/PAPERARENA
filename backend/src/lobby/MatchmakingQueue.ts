@@ -7,6 +7,7 @@ export interface QueueEntry {
   color: string;
   joinedAt: number;
   identityKey: string;
+  depositIntentId?: string;
 }
 
 export interface LockedLobby {
@@ -28,6 +29,7 @@ export class MatchmakingQueue {
     wager: WagerAmount,
     username: string,
     color: string,
+    depositIntentId?: string,
   ): LockedLobby | null {
     const key = queueKey(arena, wager);
     const identityKey = queueIdentity(session);
@@ -36,7 +38,14 @@ export class MatchmakingQueue {
 
     const bucket = this.buckets.get(key) ?? [];
 
-    bucket.push({ session, username, color, joinedAt: Date.now(), identityKey });
+    bucket.push({
+      session,
+      username,
+      color,
+      joinedAt: Date.now(),
+      identityKey,
+      depositIntentId,
+    });
     this.buckets.set(key, bucket);
 
     const needed = CONFIG.ARENAS[arena].players;

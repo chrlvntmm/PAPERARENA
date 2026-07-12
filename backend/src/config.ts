@@ -28,14 +28,25 @@ const envSchema = z.object({
   AUTH_EXPECTED_URI: z.string().url(),
   AUTH_SESSION_TTL_SECONDS: z.coerce.number().int().positive(),
   AUTH_CHALLENGE_TTL_SECONDS: z.coerce.number().int().positive(),
+  DEPOSIT_INTENT_TTL_SECONDS: z.coerce.number().int().positive(),
   AUTH_COOKIE_SECURE: z.enum(["true", "false"]),
   AUTH_COOKIE_SAME_SITE: z.enum(["strict", "lax", "none"]),
   ETH_RPC_URL: optionalUrl(),
   SEPOLIA_RPC_URL: optionalUrl(),
+  SOLANA_CLUSTER: z.enum(["devnet", "mainnet-beta"]),
+  SOLANA_DEVNET_RPC_URL: optionalUrl(),
+  SOLANA_MAINNET_RPC_URL: optionalUrl(),
   SOLANA_RPC_URL: optionalUrl(),
   SOLANA_AUTH_BYPASS: z.enum(["true", "false"]).optional(),
   ESCROW_BYPASS: z.enum(["true", "false"]).optional(),
   AUTH_DEV_BYPASS: z.enum(["true", "false"]).optional(),
+  ESCROW_PROGRAM_ID: z.string().min(1).optional(),
+  ESCROW_TOKEN_MINT: z.string().min(1).optional(),
+  ESCROW_TREASURY_TOKEN_ACCOUNT: z.string().min(1).optional(),
+  ESCROW_TOKEN_SYMBOL: z.string().min(1).optional(),
+  ESCROW_TOKEN_DECIMALS: z.coerce.number().int().min(0).max(12).optional(),
+  ESCROW_GAME_AUTHORITY_SECRET: z.string().min(1).optional(),
+  ESCROW_GAME_AUTHORITY_KEYPAIR_PATH: z.string().min(1).optional(),
   LOGIC_TICK_MS: z.coerce.number().int().positive(),
   MOVEMENT_TICKS_PER_STEP: z.coerce.number().int().positive(),
   BROADCAST_HZ: z.coerce.number().int().positive(),
@@ -61,6 +72,14 @@ if (!parsed.success) {
 }
 
 const env = parsed.data;
+const solanaRpcUrl =
+  env.SOLANA_CLUSTER === "devnet"
+    ? env.SOLANA_DEVNET_RPC_URL ?? env.SOLANA_RPC_URL
+    : env.SOLANA_MAINNET_RPC_URL ?? env.SOLANA_RPC_URL;
+
+if (!solanaRpcUrl) {
+  throw new Error(`SOLANA_${env.SOLANA_CLUSTER === "devnet" ? "DEVNET" : "MAINNET"}_RPC_URL is required for SOLANA_CLUSTER=${env.SOLANA_CLUSTER}.`);
+}
 
 if (
   env.NODE_ENV === "production" &&
@@ -69,6 +88,24 @@ if (
     env.AUTH_DEV_BYPASS === "true")
 ) {
   throw new Error("Production cannot start with auth or escrow bypass flags enabled.");
+}
+
+if (env.NODE_ENV === "production") {
+  const missingEscrow: string[] = [];
+  if (!env.ESCROW_PROGRAM_ID) missingEscrow.push("ESCROW_PROGRAM_ID");
+  if (!env.ESCROW_TOKEN_MINT) missingEscrow.push("ESCROW_TOKEN_MINT");
+  if (!env.ESCROW_TREASURY_TOKEN_ACCOUNT) missingEscrow.push("ESCROW_TREASURY_TOKEN_ACCOUNT");
+  if (!env.ESCROW_GAME_AUTHORITY_SECRET && !env.ESCROW_GAME_AUTHORITY_KEYPAIR_PATH) {
+    missingEscrow.push("ESCROW_GAME_AUTHORITY_SECRET or ESCROW_GAME_AUTHORITY_KEYPAIR_PATH");
+  }
+  if (missingEscrow.length > 0) {
+    throw new Error(
+      `Production requires complete escrow configuration. Missing: ${missingEscrow.join(", ")}`,
+    );
+  }
+  if (env.ESCROW_TOKEN_DECIMALS === undefined) {
+    // default is fine but log-required: keep default 6
+  }
 }
 
 const wagers = env.WAGER_TIERS.split(",").map((value) => Number(value.trim()));
@@ -143,13 +180,26 @@ export const CONFIG = {
     EXPECTED_URI: env.AUTH_EXPECTED_URI,
     SESSION_TTL_SECONDS: env.AUTH_SESSION_TTL_SECONDS,
     CHALLENGE_TTL_SECONDS: env.AUTH_CHALLENGE_TTL_SECONDS,
+    DEPOSIT_INTENT_TTL_SECONDS: env.DEPOSIT_INTENT_TTL_SECONDS,
     COOKIE_SECURE: env.AUTH_COOKIE_SECURE === "true",
     COOKIE_SAME_SITE: env.AUTH_COOKIE_SAME_SITE,
   },
   RPC: {
     ETHEREUM_MAINNET_URL: env.ETH_RPC_URL,
     SEPOLIA_URL: env.SEPOLIA_RPC_URL,
-    SOLANA_URL: env.SOLANA_RPC_URL,
+    SOLANA_CLUSTER: env.SOLANA_CLUSTER,
+    SOLANA_CHAIN_ID: `solana:${env.SOLANA_CLUSTER}`,
+    SOLANA_URL: solanaRpcUrl,
+  },
+  ESCROW: {
+    PROGRAM_ID: env.ESCROW_PROGRAM_ID,
+    TOKEN_MINT: env.ESCROW_TOKEN_MINT,
+    TREASURY_TOKEN_ACCOUNT: env.ESCROW_TREASURY_TOKEN_ACCOUNT,
+    TOKEN_SYMBOL: env.ESCROW_TOKEN_SYMBOL ?? "USDC",
+    TOKEN_DECIMALS: env.ESCROW_TOKEN_DECIMALS ?? 6,
+    GAME_AUTHORITY_SECRET: env.ESCROW_GAME_AUTHORITY_SECRET,
+    GAME_AUTHORITY_KEYPAIR_PATH: env.ESCROW_GAME_AUTHORITY_KEYPAIR_PATH,
+    BYPASS: env.ESCROW_BYPASS === "true",
   },
   LOGIC_TICK_MS: env.LOGIC_TICK_MS,
   MOVEMENT_TICKS_PER_STEP: env.MOVEMENT_TICKS_PER_STEP,

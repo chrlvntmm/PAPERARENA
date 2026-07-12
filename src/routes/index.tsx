@@ -1,10 +1,14 @@
+import "@/lib/buffer-polyfill";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ConnectButton } from "@rainbow-me/rainbowkit";
+import { Copy, LogOut, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import Game from "@/game/Game";
 import { useGameSocket } from "@/game/useGameSocket";
-import { useWallet, formatUSD, formatNativeBalance } from "@/lib/wallet";
+import { useWallet, formatPlayableBalance } from "@/lib/wallet";
 import { playClickSound, playWinSound, installAudioUnlock } from "@/lib/audio";
+import { confirmDeposit, createDepositIntent } from "@/lib/deposit";
+import { sendDepositTransaction } from "@/lib/deposit-tx";
+import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -24,8 +28,11 @@ const PLAYER_OPTIONS = [
 ];
 const WAGER_OPTIONS = [5, 10, 20];
 const PLATFORM_FEE = Number(import.meta.env.VITE_PLATFORM_FEE);
+// Smaller local lobbies only — does NOT skip escrow deposits.
 const DEV_MATCH_ENTRY = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_MATCH_ENTRY === "true";
 const DEV_STANDARD_ARENA_PLAYERS = Number(import.meta.env.VITE_DEV_STANDARD_ARENA_PLAYERS);
+// Only skip on-chain deposit when backend also has ESCROW_BYPASS=true.
+const SKIP_DEPOSIT = import.meta.env.DEV && import.meta.env.VITE_SKIP_DEPOSIT === "true";
 
 if (!Number.isFinite(PLATFORM_FEE)) {
   throw new Error("VITE_PLATFORM_FEE is required.");
@@ -51,45 +58,34 @@ type LobbyPhase = "idle" | "queueing" | "in_match";
 
 function Index() {
   const wallet = useWallet();
+  const solanaWallet = useSolanaWallet();
   const socket = useGameSocket();
   const [players, setPlayers] = useState(5);
   const [wager, setWager] = useState(10);
   const mode = "territory" as const;
   const [phase, setPhase] = useState<LobbyPhase>("idle");
-  const [username, setUsername] = useState("PLAYER");
+  const [username, setUsername] = useState("");
   const [skin, setSkin] = useState(SKIN_COLORS[0]);
-  const [evmSignPending, setEvmSignPending] = useState(false);
   const [walletActionError, setWalletActionError] = useState<string | null>(null);
+  const [usernameError, setUsernameError] = useState<string | null>(null);
+  const [usernameSaving, setUsernameSaving] = useState(false);
+  const [usernameSaved, setUsernameSaved] = useState(false);
   const [walletCopied, setWalletCopied] = useState(false);
+  const [joinStatus, setJoinStatus] = useState<string | null>(null);
   const joinPendingRef = useRef(false);
-  const wagerDeductedRef = useRef(false);
 
   useEffect(() => { installAudioUnlock(); }, []);
 
   useEffect(() => {
-    setUsername(`PLAYER_${Math.floor(1000 + Math.random() * 9000)}`);
-  }, []);
-
-  useEffect(() => {
-    if (!evmSignPending || wallet.connected || !wallet.evmWalletReady) return;
-    let cancelled = false;
-    setWalletActionError(null);
-    wallet
-      .signInEvm()
-      .then(() => {
-        if (!cancelled) setEvmSignPending(false);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setWalletActionError(err instanceof Error ? err.message : "Could not sign in with that wallet.");
-          setEvmSignPending(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [evmSignPending, wallet.connected, wallet.evmWalletReady, wallet.signInEvm]);
+    if (wallet.loading) return;
+    if (wallet.user?.displayName) {
+      setUsername(wallet.user.displayName);
+      return;
+    }
+    if (!username) {
+      setUsername(`PLAYER_${Math.floor(1000 + Math.random() * 9000)}`);
+    }
+  }, [wallet.loading, wallet.user?.displayName, username]);
 
   useEffect(() => {
     if (socket.matchId && socket.playerId != null && socket.snapshot) {
@@ -100,30 +96,46 @@ function Index() {
   useEffect(() => {
     if (!socket.error || phase !== "queueing") return;
     joinPendingRef.current = false;
-    if (wagerDeductedRef.current) {
-      wallet.credit(wager);
-      wagerDeductedRef.current = false;
-    }
+    setJoinStatus(null);
+    setWalletActionError(socket.error);
     setPhase("idle");
-  }, [phase, socket.error, wager, wallet]);
+  }, [phase, socket.error]);
 
   const totalPot = players * wager;
   const fee = totalPot * PLATFORM_FEE;
   const prize = totalPot - fee;
   const isQueueing = phase === "queueing";
+  const isSessionLoading = wallet.loading;
   const arena = players === 5 ? "standard" as const : "mega" as const;
   const expectedQueueNeeded =
     socket.queueNeeded ??
     (DEV_MATCH_ENTRY && arena === "standard" ? DEV_STANDARD_ARENA_PLAYERS : players);
+  const displayUsername = isSessionLoading ? "SYNCING" : username || "PLAYER";
   const walletLabel = wallet.primaryWallet
     ? `${wallet.primaryWallet.address.slice(0, 4)}...${wallet.primaryWallet.address.slice(-4)}`
     : "CONNECT WALLET";
+  const connectWalletLabel = isSessionLoading
+    ? "SYNCING"
+    : wallet.connected
+    ? walletLabel
+    : wallet.solanaWalletReady || wallet.hasWalletConnection
+      ? "SIGN WALLET"
+      : "CONNECT WALLET";
+  const balanceWalletLabel = wallet.solanaWallet
+    ? `${wallet.solanaWallet.address.slice(0, 4)}...${wallet.solanaWallet.address.slice(-4)}`
+    : wallet.primaryWallet
+      ? `${wallet.primaryWallet.address.slice(0, 4)}...${wallet.primaryWallet.address.slice(-4)}`
+      : "Wallet not connected";
+  const normalizedUsername = normalizeUsername(username);
+  const usernameValid = /^[A-Z0-9_]{3,16}$/.test(normalizedUsername);
+  const usernameDirty = wallet.connected && normalizedUsername !== (wallet.user?.displayName ?? "");
 
   const handleCopyWallet = async () => {
     playClickSound();
-    if (!wallet.primaryWallet) return;
+    const address = wallet.solanaWallet?.address ?? wallet.primaryWallet?.address;
+    if (isSessionLoading || !address) return;
     try {
-      await navigator.clipboard.writeText(wallet.primaryWallet.address);
+      await navigator.clipboard.writeText(address);
       setWalletCopied(true);
       window.setTimeout(() => setWalletCopied(false), 1200);
     } catch (err) {
@@ -133,33 +145,163 @@ function Index() {
 
   const handleRefreshWallet = async () => {
     playClickSound();
+    if (isSessionLoading) return;
     setWalletActionError(null);
     await wallet.refresh();
   };
 
+  const playableLabel = formatPlayableBalance(
+    wallet.playableBalance,
+    wallet.playableBalanceSymbol,
+  );
+
+  const handleDisconnectWallet = async () => {
+    playClickSound();
+    if (isSessionLoading) return;
+    setWalletActionError(null);
+    try {
+      await wallet.signOut();
+    } catch (err) {
+      setWalletActionError(err instanceof Error ? err.message : "Could not disconnect wallet.");
+    }
+  };
+
+  const handleConnectSolana = async () => {
+    playClickSound();
+    if (isSessionLoading) return;
+    setWalletActionError(null);
+    try {
+      await wallet.signInSolana();
+    } catch (err) {
+      setWalletActionError(err instanceof Error ? err.message : "Could not connect a Solana wallet.");
+    }
+  };
+
+  const saveUsername = async () => {
+    if (isSessionLoading) return false;
+    setUsernameError(null);
+    setUsernameSaved(false);
+    const nextUsername = normalizeUsername(username);
+
+    if (!/^[A-Z0-9_]{3,16}$/.test(nextUsername)) {
+      setUsernameError("Use 3-16 letters, numbers, or underscore.");
+      return false;
+    }
+
+    if (!wallet.connected) {
+      setUsernameError("Connect wallet before saving username.");
+      return false;
+    }
+
+    if (nextUsername === wallet.user?.displayName) {
+      setUsername(nextUsername);
+      return true;
+    }
+
+    setUsernameSaving(true);
+    try {
+      const user = await wallet.updateDisplayName(nextUsername);
+      setUsername(user.displayName ?? nextUsername);
+      setUsernameSaved(true);
+      window.setTimeout(() => setUsernameSaved(false), 1200);
+      return true;
+    } catch (err) {
+      setUsernameError(err instanceof Error ? err.message : "Could not save username.");
+      return false;
+    } finally {
+      setUsernameSaving(false);
+    }
+  };
+
+  const handleSaveUsername = async () => {
+    playClickSound();
+    await saveUsername();
+  };
+
   const handleJoin = async () => {
     playClickSound();
-    if (!wallet.connected) {
-      setWalletActionError(null);
-      setEvmSignPending(true);
-      wallet.openEvmPicker();
+    if (isSessionLoading) return;
+    if (!wallet.connected || !wallet.solanaWallet) {
+      await handleConnectSolana();
       return;
     }
+    if (!(await saveUsername())) return;
     if (isQueueing) return;
+
     joinPendingRef.current = true;
+    setWalletActionError(null);
     setPhase("queueing");
-    socket.connect();
+
     try {
+      let depositIntentId: string | undefined;
+
+      if (!SKIP_DEPOSIT) {
+        if (!wallet.solanaWallet) {
+          throw new Error("Connect a Solana wallet to deposit and join.");
+        }
+        if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+          throw new Error("Solana wallet is not ready to sign the deposit. Open your Solana wallet and try again.");
+        }
+
+        setJoinStatus("Creating deposit intent…");
+        const intent = await createDepositIntent({
+          arena,
+          wager,
+          walletId: wallet.solanaWallet.id,
+        });
+
+        if (intent.status === "verified") {
+          depositIntentId = intent.id;
+        } else if (intent.build) {
+          setJoinStatus("Approve deposit in your wallet…");
+          const txSignature = await sendDepositTransaction({
+            build: intent.build,
+            playerPublicKey: solanaWallet.publicKey,
+            signTransaction: solanaWallet.signTransaction.bind(solanaWallet),
+          });
+          setJoinStatus("Confirming deposit on-chain…");
+          const confirmed = await confirmDeposit({
+            depositIntentId: intent.id,
+            txSignature,
+            walletId: wallet.solanaWallet.id,
+          });
+          if (confirmed.status !== "verified") {
+            throw new Error(confirmed.verificationError ?? "Deposit was not verified.");
+          }
+          depositIntentId = confirmed.id;
+        } else if (intent.contractStatus === "not_configured") {
+          throw new Error(intent.verificationError ?? "Escrow contract is not configured.");
+        } else {
+          throw new Error(
+            intent.verificationError ??
+              "Deposit is not ready. Ensure the backend escrow program is configured and try again.",
+          );
+        }
+
+        if (!depositIntentId) {
+          throw new Error("Deposit verification is required before joining.");
+        }
+      }
+
+      setJoinStatus("Connecting to arena…");
+      socket.connect();
       await socket.waitForAuth();
-      if (joinPendingRef.current) {
-        socket.joinQueue(arena, wager, username || "PLAYER", skin);
-      }
-    } catch {
-      if (wagerDeductedRef.current) {
-        wallet.credit(wager);
-        wagerDeductedRef.current = false;
-      }
+      if (!joinPendingRef.current) return;
+
+      setJoinStatus("Joining queue…");
+      await socket.joinQueue(
+        arena,
+        wager,
+        normalizedUsername || "PLAYER",
+        skin,
+        depositIntentId,
+      );
+      // Server accepted join (queue_update / match_preparing / match_start).
+      setJoinStatus(null);
+    } catch (err) {
       joinPendingRef.current = false;
+      setJoinStatus(null);
+      setWalletActionError(err instanceof Error ? err.message : "Could not join match.");
       setPhase("idle");
     }
   };
@@ -167,27 +309,17 @@ function Index() {
   const handleCancelQueue = () => {
     playClickSound();
     joinPendingRef.current = false;
+    setJoinStatus(null);
     socket.leaveQueue();
-    if (wagerDeductedRef.current) {
-      wallet.credit(wager);
-      wagerDeductedRef.current = false;
-    }
     setPhase("idle");
   };
 
   const handleGameEnd = (result: { won: boolean; payout?: number }) => {
     joinPendingRef.current = false;
-    wagerDeductedRef.current = false;
-    if (mode === "territory") {
-      const p = result.payout ?? 0;
-      if (p > 0) {
-        wallet.credit(p);
-        if (result.won) playWinSound();
-      }
-    } else if (result.won) {
-      wallet.credit(result.payout ?? prize);
-      playWinSound();
-    }
+    setJoinStatus(null);
+    if (result.won) playWinSound();
+    // Payouts settle on-chain from backend match results — no client-side balance credit.
+    void wallet.refresh();
     socket.reset();
     socket.disconnect();
     setPhase("idle");
@@ -210,65 +342,38 @@ function Index() {
 
   return (
     <main className="min-h-screen w-full grid-bg-sharp" style={{ background: "#0a0b0d" }}>
-      <div className="max-w-[1600px] mx-auto px-6 py-6">
+      <div className="max-w-[1600px] mx-auto px-3 sm:px-5 lg:px-6 py-4 sm:py-6">
         {/* Header */}
-        <header className="flex items-center justify-between mb-8">
-          <span className="font-display text-xl tracking-widest text-white">Welcome, <span style={{ color: "#f4ff3a" }}>{username || "PLAYER"}</span></span>
-          <div className="flex items-center gap-3">
+        <header className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-6 sm:mb-8">
+          <span className="font-display text-base sm:text-xl tracking-[0.14em] sm:tracking-widest text-white min-w-0 break-words">Welcome, <span className="break-all" style={{ color: "#f4ff3a" }}>{displayUsername}</span></span>
+          <div className="flex flex-col min-[420px]:flex-row sm:flex-row items-stretch sm:items-center gap-3">
             <Link
               to="/guide"
               onClick={() => playClickSound()}
-              className="flex items-center gap-2 font-display text-xs tracking-[0.25em] px-4 py-3 rounded border border-white/10 hover:border-[#f4ff3a]/50 hover:bg-[#f4ff3a]/5 text-white/80 hover:text-[#f4ff3a] transition"
+              className="flex items-center justify-center gap-2 font-display text-[11px] sm:text-xs tracking-[0.18em] sm:tracking-[0.25em] px-4 py-3 rounded border border-white/10 hover:border-[#f4ff3a]/50 hover:bg-[#f4ff3a]/5 text-white/80 hover:text-[#f4ff3a] transition"
             >
               <HelpIcon /> HOW TO PLAY
             </Link>
-            <ConnectButton.Custom>
-              {({ account, chain, mounted, openConnectModal }) => {
-                const evmSelected = mounted && account && chain;
-                const label = wallet.connected
-                  ? walletLabel
-                  : evmSelected
-                    ? evmSignPending
-                      ? "SIGNING..."
-                      : "SIGN TO LOGIN"
-                    : "CONNECT WALLET";
-
-                return (
-                  <button
-                    onClick={async () => {
-                      playClickSound();
-                      setWalletActionError(null);
-                      try {
-                        if (wallet.connected) {
-                          setEvmSignPending(false);
-                          await wallet.signOut();
-                          return;
-                        }
-                        setEvmSignPending(true);
-                        if (evmSelected) return;
-                        openConnectModal?.();
-                      } catch (err) {
-                        setWalletActionError(err instanceof Error ? err.message : "Wallet action failed.");
-                        setEvmSignPending(false);
-                      }
-                    }}
-                    className="font-display text-xs tracking-[0.3em] px-5 py-3 neon-border rounded hover:bg-white/5 transition"
-                  >
-                    {label}
-                  </button>
-                );
-              }}
-            </ConnectButton.Custom>
+            <button
+              onClick={wallet.connected ? handleDisconnectWallet : handleConnectSolana}
+              disabled={isSessionLoading}
+              className="font-display text-[11px] sm:text-xs tracking-[0.18em] sm:tracking-[0.3em] px-5 py-3 neon-border rounded hover:bg-white/5 disabled:opacity-60 disabled:cursor-wait transition"
+            >
+              {connectWalletLabel}
+            </button>
           </div>
         </header>
 
         {/* Title */}
-        <div className="text-center mb-8">
-          <h1 className="font-display font-black text-6xl md:text-7xl tracking-tighter">
-            <span className="text-white" style={{ textShadow: "0 0 20px rgba(255,255,255,0.3)" }}>PAPER</span>
-            <span style={{ color: "#f4ff3a", textShadow: "0 0 20px rgba(244,255,58,0.6)" }}>ARENA</span>
+        <div className="text-center mb-6 sm:mb-8">
+          <h1
+            className="font-display font-black leading-none max-w-full overflow-hidden"
+            style={{ fontSize: "clamp(2.15rem, 11.5vw, 4.5rem)" }}
+          >
+            <span className="block min-[420px]:inline text-white" style={{ textShadow: "0 0 20px rgba(255,255,255,0.3)" }}>PAPER</span>
+            <span className="block min-[420px]:inline" style={{ color: "#f4ff3a", textShadow: "0 0 20px rgba(244,255,58,0.6)" }}>ARENA</span>
           </h1>
-          <div className="font-display tracking-[0.5em] text-sm text-white/70 mt-2">{"\n"}</div>
+          <div className="font-display tracking-[0.35em] sm:tracking-[0.5em] text-xs sm:text-sm text-white/70 mt-2">{"\n"}</div>
         </div>
 
         {/* Grid: 3 cols */}
@@ -309,19 +414,19 @@ function Index() {
 
 
             <Section label="ARENA SIZE">
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {PLAYER_OPTIONS.map(opt => (
                   <button
                     key={opt.n}
                     onClick={() => { if (!isQueueing) { playClickSound(); setPlayers(opt.n); } }}
                     disabled={isQueueing}
-                    className={`py-4 px-2 rounded-lg transition border-2 ${
+                    className={`min-h-[92px] py-4 px-2 rounded-lg transition border-2 ${
                       players === opt.n
                         ? "border-[#f4ff3a] bg-[#f4ff3a]/10"
                         : "border-white/10 hover:border-white/30"
                     } ${isQueueing ? "opacity-50 cursor-not-allowed" : ""}`}
                   >
-                    <div className={`font-display font-black whitespace-nowrap text-lg ${players === opt.n ? "text-[#f4ff3a]" : "text-white"}`}>{opt.display}</div>
+                    <div className={`font-display font-black text-base sm:text-lg leading-tight break-words ${players === opt.n ? "text-[#f4ff3a]" : "text-white"}`}>{opt.display}</div>
                     <div className="text-[10px] tracking-widest text-white/60 font-display mt-1 whitespace-pre-line">{opt.label}</div>
                   </button>
                 ))}
@@ -335,7 +440,7 @@ function Index() {
                     key={w}
                     onClick={() => { if (!isQueueing) { playClickSound(); setWager(w); } }}
                     disabled={isQueueing}
-                    className={`py-4 rounded-lg font-display text-2xl font-black transition ${
+                    className={`py-4 rounded-lg font-display text-xl sm:text-2xl font-black transition ${
                       wager === w
                         ? "text-[#0a0b0d]"
                         : "text-white bg-white/5 border-2 border-white/10 hover:border-white/30"
@@ -355,15 +460,17 @@ function Index() {
                   <Row label="Wager / player" value={`$${wager.toFixed(2)}`} />
                 </div>
                 <div className="h-px bg-white/10 my-3" />
-                <div className="flex items-baseline justify-between">
-                  <span className="text-xs tracking-[0.3em] font-display text-white/70">TOTAL MAP VALUE</span>
-                  <span className="font-display text-4xl font-black tabular-nums" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.6)" }}>${totalPot.toFixed(2)}</span>
+                <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-baseline justify-between gap-1">
+                  <span className="text-[11px] sm:text-xs tracking-[0.22em] sm:tracking-[0.3em] font-display text-white/70">TOTAL MAP VALUE</span>
+                  <span className="font-display text-3xl sm:text-4xl font-black tabular-nums" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.6)" }}>${totalPot.toFixed(2)}</span>
                 </div>
                 <div className="flex items-baseline justify-between mt-1">
                   <span className="text-xs tracking-wider font-display text-white/60">Platform Fee ({(PLATFORM_FEE * 100).toFixed(0)}%)</span>
                   <span className="font-mono text-base font-semibold text-white/60 tabular-nums">−${fee.toFixed(2)}</span>
                 </div>
-                <div className="text-[10px] text-white/50 font-display tracking-wider pt-3">Fee deducted from survivor payouts at cash-out.</div>
+                <div className="text-[10px] text-white/50 font-display tracking-wider pt-3">
+                  Platform fee {(PLATFORM_FEE * 100).toFixed(0)}%
+                </div>
               </div>
             </Section>
 
@@ -387,15 +494,28 @@ function Index() {
 
             {isQueueing ? (
               <div className="mt-5 rounded-xl p-6 text-center border border-[#f4ff3a]/40" style={{ background: "rgba(244,255,58,0.06)" }}>
+                {joinStatus && (
+                  <div className="mb-3 text-xs font-display tracking-wider text-white/70">{joinStatus}</div>
+                )}
                 <div className="flex items-center justify-center gap-2 mb-3">
                   <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: "#f4ff3a", boxShadow: "0 0 10px #f4ff3a" }} />
-                  <span className="font-display text-xs tracking-[0.35em] text-[#f4ff3a]">SEARCHING FOR OPPONENTS</span>
+                  <span className="font-display text-xs tracking-[0.35em] text-[#f4ff3a]">
+                    {socket.matchPreparing ? "STARTING MATCH" : "SEARCHING FOR OPPONENTS"}
+                  </span>
                 </div>
                 <div className="font-display text-2xl font-black text-white tracking-wider mb-1">
-                  FINDING PLAYERS… {socket.queuePosition ?? 1}/{expectedQueueNeeded}
+                  {socket.matchPreparing
+                    ? "LOCKING FUNDS…"
+                    : `FINDING PLAYERS… ${socket.queuePosition ?? 1}/${expectedQueueNeeded}`}
                 </div>
                 <div className="text-[11px] text-white/50 font-display tracking-wider mb-5">
-                  {socket.connected ? "Connected to arena server" : "Connecting to arena server…"}
+                  {!socket.connected
+                    ? "Connecting to arena server…"
+                    : !socket.authenticated
+                      ? "Authenticating…"
+                      : socket.matchPreparing
+                        ? "Match found — securing escrow…"
+                        : "In queue"}
                 </div>
                 <button
                   onClick={handleCancelQueue}
@@ -408,24 +528,23 @@ function Index() {
               <>
             <button
               onClick={handleJoin}
-              disabled={isQueueing}
-              className="mt-5 w-full py-5 rounded-xl font-display font-black tracking-[0.25em] text-lg text-[#0a0b0d] transition active:translate-y-0.5 disabled:cursor-not-allowed"
+              disabled={isSessionLoading || isQueueing}
+              className="mt-5 w-full py-5 rounded-xl font-display font-black tracking-[0.14em] sm:tracking-[0.25em] text-base sm:text-lg text-[#0a0b0d] transition active:translate-y-0.5 disabled:cursor-not-allowed"
               style={{
                 background: "linear-gradient(180deg, #fff96a 0%, #f4ff3a 50%, #d4dd1f 100%)",
                 boxShadow: "0 0 30px rgba(244,255,58,0.5), 0 6px 0 rgba(120,130,10,0.6), inset 0 1px 0 rgba(255,255,255,0.6)",
               }}
             >
-              {!wallet.connected
-                ? "CONNECT WALLET TO JOIN"
+              {isSessionLoading
+                ? "SYNCING WALLET"
+                : !wallet.connected
+                ? wallet.solanaWalletReady || wallet.hasWalletConnection
+                  ? "SIGN WALLET TO JOIN"
+                  : "CONNECT WALLET TO JOIN"
+                : !DEV_MATCH_ENTRY && !wallet.solanaWallet
+                  ? "CONNECT SOLANA WALLET"
                 : "▶ JOIN GAME"}
             </button>
-            <div className="mt-3 text-[11px] text-center font-display tracking-wider text-white/50">
-              {!wallet.connected
-                ? "Connect your wallet to enter the arena"
-                : DEV_MATCH_ENTRY
-                  ? "Local playtest mode. Deposits and payouts are not active."
-                  : (mode === "territory" ? "Conquer as much territory as possible and earn its value" : "NO TIME LIMIT · LAST PLAYER STANDING WINS")}
-            </div>
               </>
             )}
           </Widget>
@@ -433,53 +552,73 @@ function Index() {
           {/* RIGHT: Wallet (top) + Customize (bottom) */}
           <div className="flex flex-col gap-5">
             <Widget>
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-3 mb-4">
                 <div className="flex items-center gap-2">
                   <WalletIcon />
                   <span className="font-display text-xl text-white tracking-wide">Wallet</span>
                 </div>
                 <div className="flex items-center gap-3 text-xs text-white/60">
+                  {!wallet.solanaWallet && (
+                    <button
+                    onClick={handleConnectSolana}
+                    disabled={isSessionLoading}
+                    className="hover:text-white transition"
+                  >
+                      Solana
+                    </button>
+                  )}
                   <button
                     onClick={handleCopyWallet}
-                    disabled={!wallet.primaryWallet}
-                    className="hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={isSessionLoading || !wallet.solanaWallet}
+                    className="inline-flex items-center gap-1 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Copy wallet address"
                   >
-                    {walletCopied ? "Copied" : "Copy"}
+                    <Copy size={14} /> {walletCopied ? "Copied" : "Copy"}
                   </button>
                   <button
                     onClick={handleRefreshWallet}
-                    disabled={!wallet.connected || wallet.balanceLoading}
-                    className="hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={isSessionLoading || !wallet.connected || wallet.balanceLoading}
+                    className="inline-flex items-center gap-1 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Refresh playable balance"
                   >
-                    {wallet.balanceLoading ? "Refreshing" : "Refresh"}
+                    <RefreshCw size={14} /> {wallet.balanceLoading ? "Refreshing" : "Refresh"}
                   </button>
                 </div>
               </div>
-              <div className="text-center py-4">
-                <div className="font-display font-black text-5xl" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.5)" }}>{formatNativeBalance(wallet.nativeBalance, wallet.nativeBalanceSymbol)}</div>
-                <div className="text-white/60 font-mono text-sm mt-1">{wallet.primaryWallet ? walletLabel : "Wallet not connected"}</div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 mt-2">
-                <button
-                  onClick={playClickSound}
-                  className="py-3 rounded-lg font-display font-bold tracking-wider text-sm text-white transition active:translate-y-0.5"
-                  style={{
-                    background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)",
-                    boxShadow: "0 4px 0 #14532d, inset 0 1px 0 rgba(255,255,255,0.3), 0 0 12px rgba(34,197,94,0.3)",
-                  }}
-                >
-                  Add Funds
-                </button>
-                <button
-                  onClick={playClickSound}
-                  className="py-3 rounded-lg font-display font-bold tracking-wider text-sm text-white transition active:translate-y-0.5"
-                  style={{
-                    background: "linear-gradient(180deg, #818cf8 0%, #4f46e5 100%)",
-                    boxShadow: "0 4px 0 #1e1b4b, inset 0 1px 0 rgba(255,255,255,0.3), 0 0 12px rgba(99,102,241,0.3)",
-                  }}
-                >
-                  Cash Out
-                </button>
+              <div className="text-center py-4 min-w-0">
+                <div className="font-display font-black leading-none break-words" style={{ color: "#f4ff3a", textShadow: "0 0 16px rgba(244,255,58,0.5)", fontSize: "clamp(2rem, 10vw, 3rem)" }}>
+                  {isSessionLoading || wallet.balanceLoading
+                    ? "..."
+                    : !wallet.connected
+                      ? "—"
+                      : playableLabel}
+                </div>
+                {wallet.connected && (
+                  <div className="mt-2 flex items-center justify-center gap-2">
+                    <div className="text-white/60 font-mono text-sm break-all">{balanceWalletLabel}</div>
+                    <button
+                      onClick={handleDisconnectWallet}
+                      className="grid h-8 w-8 shrink-0 place-items-center rounded border border-white/10 text-white/55 hover:border-[#ff3a6b]/60 hover:text-[#ff3a6b] transition"
+                      title="Disconnect wallet"
+                      aria-label="Disconnect wallet"
+                    >
+                      <LogOut size={15} />
+                    </button>
+                  </div>
+                )}
+                {!wallet.connected && wallet.hasWalletConnection && (
+                  <div className="mt-2 flex items-center justify-center gap-2">
+                    <div className="text-white/50 font-mono text-sm">Wallet selected</div>
+                    <button
+                      onClick={handleDisconnectWallet}
+                      className="grid h-8 w-8 shrink-0 place-items-center rounded border border-white/10 text-white/55 hover:border-[#ff3a6b]/60 hover:text-[#ff3a6b] transition"
+                      title="Disconnect wallet"
+                      aria-label="Disconnect wallet"
+                    >
+                      <LogOut size={15} />
+                    </button>
+                  </div>
+                )}
               </div>
             </Widget>
 
@@ -490,15 +629,39 @@ function Index() {
               </div>
 
               <label className="text-[10px] tracking-[0.3em] text-white/60 font-display">USERNAME</label>
-              <input
+              <div className="mt-1 mb-2 flex flex-col min-[420px]:flex-row gap-2">
+                <input
                 value={username}
-                onChange={e => setUsername(e.target.value.slice(0, 16).toUpperCase())}
+                onChange={e => {
+                    setUsernameSaved(false);
+                    setUsernameError(null);
+                    setUsername(normalizeUsername(e.target.value).slice(0, 16));
+                }}
                 maxLength={16}
-                className="w-full mt-1 mb-4 px-4 py-3 rounded-lg bg-white/5 border-2 border-white/10 focus:border-[#f4ff3a]/60 focus:outline-none text-white font-display tracking-widest text-lg"
+                disabled={isSessionLoading}
+                className="min-w-0 flex-1 px-4 py-3 rounded-lg bg-white/5 border-2 border-white/10 focus:border-[#f4ff3a]/60 focus:outline-none text-white font-display tracking-widest text-lg"
               />
+                <button
+                  onClick={handleSaveUsername}
+                  disabled={isSessionLoading || !wallet.connected || !usernameValid || usernameSaving || !usernameDirty}
+                  className="px-4 py-3 rounded-lg border border-white/15 font-display text-[11px] tracking-[0.18em] text-white hover:border-[#f4ff3a]/60 hover:text-[#f4ff3a] disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  {usernameSaving ? "SAVING" : usernameSaved ? "SAVED" : "SAVE"}
+                </button>
+              </div>
+              {usernameError && (
+                <div className="mb-4 text-xs text-[#ff3a6b] font-display tracking-[0.1em]">
+                  {usernameError}
+                </div>
+              )}
+              {!usernameError && (
+                <div className="mb-4 text-[10px] text-white/45 font-display tracking-[0.16em]">
+                  {isSessionLoading ? "Checking your wallet session" : wallet.connected ? "Saved to your wallet account" : "Connect wallet to save username"}
+                </div>
+              )}
 
               <label className="text-[10px] tracking-[0.3em] text-white/60 font-display">SKIN COLOR</label>
-              <div className="flex gap-2 mt-2 mb-4">
+              <div className="flex flex-wrap gap-2 mt-2 mb-4">
                 {SKIN_COLORS.map(c => (
                   <button
                     key={c}
@@ -510,7 +673,7 @@ function Index() {
                 ))}
               </div>
 
-              <SkinPreview color={skin} username={username || "PLAYER"} />
+              <SkinPreview color={skin} username={displayUsername} />
             </Widget>
           </div>
         </section>
@@ -678,4 +841,8 @@ function hexA(hex: string, a: number) {
   const g = parseInt(h.substring(2, 4), 16);
   const b = parseInt(h.substring(4, 6), 16);
   return `rgba(${r},${g},${b},${a})`;
+}
+
+function normalizeUsername(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9_]/g, "");
 }

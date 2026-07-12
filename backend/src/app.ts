@@ -3,7 +3,7 @@ import { WebSocketServer } from "ws";
 import { CONFIG, type ArenaType, type WagerAmount } from "./config.js";
 import { authenticateSessionToken, type AuthenticatedIdentity } from "./auth/auth.service.js";
 import { getSessionTokenFromCookie } from "./auth/cookies.js";
-import { verifyEscrowBuyIn } from "./auth/escrow.service.js";
+import { lockMatchFunds, reconcileMatchLock, verifyEscrowBuyIn } from "./auth/escrow.service.js";
 import { Match } from "./game/Match.js";
 import { MatchManager } from "./game/MatchManager.js";
 import { handleHttpRequest } from "./http/auth.routes.js";
@@ -94,7 +94,25 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
               return;
             }
 
-            const escrow = await verifyEscrow(session.walletAddress!, msg.wager, "pending");
+            if (
+              !CONFIG.ESCROW.BYPASS &&
+              session.walletChainType &&
+              session.walletChainType !== "solana"
+            ) {
+              session.send({
+                type: "error",
+                code: "NO_ESCROW",
+                message: "Paid matches require a Solana wallet session.",
+              });
+              return;
+            }
+
+            const escrow = await verifyEscrow(session.walletAddress!, msg.wager, "pending", {
+              userId: session.userId,
+              walletId: session.walletId,
+              arena: msg.arena as ArenaType,
+              depositIntentId: msg.depositIntentId,
+            });
             if (!escrow.ok) {
               session.send({
                 type: "error",
@@ -104,17 +122,70 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
               return;
             }
 
+            session.depositIntentId = msg.depositIntentId;
+
             const locked = queue.join(
               session,
               msg.arena as ArenaType,
               msg.wager as WagerAmount,
               msg.username,
               msg.color,
+              msg.depositIntentId,
             );
             if (locked) {
+              // Tell clients immediately so UI is not stuck while on-chain lock runs.
+              for (const entry of locked.players) {
+                entry.session.send({
+                  type: "match_preparing",
+                  arena: locked.arena,
+                  wager: locked.wager,
+                });
+              }
+
               const match = new Match(locked.arena, locked.wager, locked.players, () => {
                 matches.remove(match.id);
               });
+
+              let fundLock = await lockMatchFunds({
+                matchId: match.id,
+                arena: locked.arena,
+                wager: locked.wager,
+                players: locked.players.map((entry) => ({
+                  walletAddress: entry.session.walletAddress ?? "",
+                  walletId: entry.session.walletId,
+                  depositIntentId: entry.depositIntentId ?? entry.session.depositIntentId,
+                })),
+              });
+
+              // If chain/RPC state is unknown, do NOT free deposits or hard-fail yet —
+              // poll reconcile until locked, proven failed, or timeout (recovery continues after).
+              if (!fundLock.ok && fundLock.pending) {
+                for (let i = 0; i < 15; i++) {
+                  await new Promise((r) => setTimeout(r, 2000));
+                  fundLock = await reconcileMatchLock(match.id);
+                  if (fundLock.ok || !fundLock.pending) break;
+                }
+              }
+
+              if (!fundLock.ok) {
+                for (const entry of locked.players) {
+                  entry.session.matchId = undefined;
+                  entry.session.playerId = undefined;
+                  entry.session.send({
+                    type: "error",
+                    code: fundLock.pending ? "LOCK_PENDING" : "LOCK_FAILED",
+                    message:
+                      fundLock.reason ??
+                      (fundLock.pending
+                        ? "Match lock is still confirming. Funds stay reserved — try again shortly."
+                        : "Could not lock match funds on-chain."),
+                  });
+                }
+                match.destroy();
+                break;
+              }
+
+              match.setOnChainMatchId(fundLock.onChainMatchIdHex);
               matches.create(match);
             }
             break;

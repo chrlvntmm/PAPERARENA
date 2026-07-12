@@ -12,6 +12,7 @@ export class ClientSession {
   walletAddress?: string;
   walletChainType?: string;
   walletChainId?: string;
+  depositIntentId?: string;
   matchId?: string;
   playerId?: number;
   lastInputAt = 0;
@@ -19,7 +20,8 @@ export class ClientSession {
   constructor(ws: WebSocket, identity?: AuthenticatedIdentity | null) {
     this.ws = ws;
     if (identity) {
-      const primaryWallet = identity.wallets[0];
+      const primaryWallet =
+        identity.wallets.find((wallet) => wallet.chainType === "solana") ?? identity.wallets[0];
       this.authenticated = true;
       this.userId = identity.user.id;
       this.walletId = primaryWallet?.id;

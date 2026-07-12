@@ -8,7 +8,14 @@ if (!WS_URL) {
 }
 
 export type ClientMessage =
-  | { type: "join_queue"; arena: "standard" | "mega"; wager: number; username: string; color: string }
+  | {
+      type: "join_queue";
+      arena: "standard" | "mega";
+      wager: number;
+      username: string;
+      color: string;
+      depositIntentId?: string;
+    }
   | { type: "leave_queue" }
   | { type: "input"; dir: Dir; seq: number }
   | { type: "ping"; t: number };
@@ -17,6 +24,7 @@ export type ServerMessage =
   | { type: "auth_ok"; sessionId: string }
   | { type: "auth_fail"; reason: string }
   | { type: "queue_update"; position: number; needed: number; arena: string; wager: number }
+  | { type: "match_preparing"; arena: string; wager: number }
   | { type: "match_start"; matchId: string; playerId: number; tick: number; snapshot: GameSnapshot }
   | { type: "state"; tick: number; serverTime: number; snapshot: GameSnapshot }
   | { type: "eliminated"; playerId: number; payload: EliminationPayload }

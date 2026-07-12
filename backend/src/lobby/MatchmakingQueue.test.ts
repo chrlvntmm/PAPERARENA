@@ -20,11 +20,14 @@ process.env.AUTH_EXPECTED_DOMAIN = "localhost";
 process.env.AUTH_EXPECTED_URI = "http://localhost:3000";
 process.env.AUTH_SESSION_TTL_SECONDS = "3600";
 process.env.AUTH_CHALLENGE_TTL_SECONDS = "300";
+process.env.DEPOSIT_INTENT_TTL_SECONDS = "900";
 process.env.AUTH_COOKIE_SECURE = "false";
 process.env.AUTH_COOKIE_SAME_SITE = "lax";
 process.env.ETH_RPC_URL = "https://example.com/eth";
 process.env.SEPOLIA_RPC_URL = "https://example.com/sepolia";
-process.env.SOLANA_RPC_URL = "https://example.com/solana";
+process.env.SOLANA_CLUSTER = "devnet";
+process.env.SOLANA_DEVNET_RPC_URL = "https://example.com/solana-devnet";
+process.env.SOLANA_MAINNET_RPC_URL = "https://example.com/solana-mainnet";
 process.env.LOGIC_TICK_MS = "50";
 process.env.MOVEMENT_TICKS_PER_STEP = "1";
 process.env.BROADCAST_HZ = "20";
@@ -38,6 +41,7 @@ process.env.MEGA_ARENA_PLAYERS = "10";
 process.env.MEGA_ARENA_DURATION_MS = "300000";
 process.env.MEGA_ARENA_COLS = "96";
 process.env.WAGER_TIERS = "5,10,20";
+process.env.ESCROW_BYPASS = "true";
 
 type SentMessage = { type: string; [key: string]: unknown };
 

@@ -1,17 +1,14 @@
 import bs58 from "bs58";
-import { useConnectModal } from "@rainbow-me/rainbowkit";
+import { useWallet as useSolanaAdapterWallet } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useAccount, useChainId, useDisconnect, useSignMessage } from "wagmi";
+import { useAccount, useConnections, useDisconnect } from "wagmi";
+import { SOLANA_CONFIG } from "./solana-config";
 
 const API_URL = import.meta.env.VITE_API_URL;
-const SOLANA_CHAIN_ID = import.meta.env.VITE_SOLANA_CHAIN_ID;
 
 if (!API_URL) {
   throw new Error("VITE_API_URL is required.");
-}
-
-if (!SOLANA_CHAIN_ID) {
-  throw new Error("VITE_SOLANA_CHAIN_ID is required.");
 }
 
 type ChainType = "solana" | "evm";
@@ -36,66 +33,78 @@ interface AuthState {
   wallets: AuthWallet[];
   loading: boolean;
   error: string | null;
+  /** @deprecated Fake client money — always null. Do not use for paid play. */
   balance: number | null;
+  /** Wager-token balance available in wallet for pay-per-match deposits. */
+  playableBalance: string | null;
+  playableBalanceSymbol: string | null;
+  playableBalanceKind: "wager_token" | "native" | null;
+  tokenMint: string | null;
+  /** Native SOL for fees only. */
+  gasBalance: string | null;
+  gasBalanceSymbol: string | null;
+  /** Alias of playableBalance for older UI call sites. */
   nativeBalance: string | null;
   nativeBalanceSymbol: string | null;
   balanceLoading: boolean;
   connected: boolean;
+  hasWalletConnection: boolean;
   primaryWallet: AuthWallet | null;
+  solanaWallet: AuthWallet | null;
   signIn: () => Promise<void>;
-  signInEvm: () => Promise<void>;
   signInSolana: () => Promise<void>;
-  openEvmPicker: () => void;
   openSolanaPicker: () => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
+  updateDisplayName: (displayName: string) => Promise<AuthUser>;
   evmWalletReady: boolean;
   evmAddress: string | null;
   solanaWalletReady: boolean;
   solanaAddress: string | null;
-  setBalance: (n: number) => void;
-  deduct: (n: number) => boolean;
-  credit: (n: number) => void;
-}
-
-interface PhantomProvider {
-  isPhantom?: boolean;
-  publicKey?: { toString(): string };
-  connect(): Promise<{ publicKey: { toString(): string } }>;
-  disconnect?(): Promise<void>;
-  signMessage(message: Uint8Array, encoding: "utf8"): Promise<{ signature: Uint8Array }>;
-}
-
-declare global {
-  interface Window {
-    solana?: PhantomProvider;
-  }
 }
 
 const Ctx = createContext<AuthState | null>(null);
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const evmAccount = useAccount();
-  const evmChainId = useChainId();
+  const evmConnections = useConnections();
   const { disconnectAsync } = useDisconnect();
-  const { signMessageAsync } = useSignMessage();
-  const { openConnectModal } = useConnectModal();
+  const solanaAdapter = useSolanaAdapterWallet();
+  const { setVisible: setSolanaWalletModalVisible } = useWalletModal();
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [wallets, setWallets] = useState<AuthWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [balance, setBalanceState] = useState<number | null>(null);
-  const [nativeBalance, setNativeBalance] = useState<string | null>(null);
-  const [nativeBalanceSymbol, setNativeBalanceSymbol] = useState<string | null>(null);
+  const [playableBalance, setPlayableBalance] = useState<string | null>(null);
+  const [playableBalanceSymbol, setPlayableBalanceSymbol] = useState<string | null>(null);
+  const [playableBalanceKind, setPlayableBalanceKind] = useState<"wager_token" | "native" | null>(null);
+  const [tokenMint, setTokenMint] = useState<string | null>(null);
+  const [gasBalance, setGasBalance] = useState<string | null>(null);
+  const [gasBalanceSymbol, setGasBalanceSymbol] = useState<string | null>(null);
   const [nativeBalanceLoading, setNativeBalanceLoading] = useState(false);
 
-  const primaryWallet = wallets[0] ?? null;
+  const solanaWallet = selectSolanaWallet(wallets);
+  const primaryWallet = solanaWallet ?? wallets[0] ?? null;
+  const hasWalletConnection =
+    Boolean(user) ||
+    evmAccount.isConnected ||
+    evmConnections.length > 0 ||
+    solanaAdapter.connected ||
+    Boolean(solanaAdapter.publicKey);
 
-  const refreshNativeBalance = useCallback(async (wallet: AuthWallet | null = primaryWallet) => {
-    if (!wallet) {
-      setNativeBalance(null);
-      setNativeBalanceSymbol(null);
+  const clearBalances = useCallback(() => {
+    setPlayableBalance(null);
+    setPlayableBalanceSymbol(null);
+    setPlayableBalanceKind(null);
+    setTokenMint(null);
+    setGasBalance(null);
+    setGasBalanceSymbol(null);
+  }, []);
+
+  const refreshNativeBalance = useCallback(async (wallet: AuthWallet | null = solanaWallet) => {
+    if (!wallet || wallet.chainType !== "solana") {
+      clearBalances();
       return;
     }
 
@@ -107,24 +116,26 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         throw new Error(payload?.message ?? "Could not refresh wallet balance.");
       }
       const payload = (await res.json()) as {
-        chainType: ChainType;
-        chainId: string;
-        address: string;
         balance: string;
         symbol: string;
-        rawValue: string;
+        balanceKind?: "wager_token" | "native";
+        tokenMint?: string;
+        gasBalance?: string;
+        gasSymbol?: string;
       };
-      console.log("[TEMP wallet balance]", payload);
-      setNativeBalance(trimBalance(payload.balance));
-      setNativeBalanceSymbol(payload.symbol);
+      setPlayableBalance(trimBalance(payload.balance));
+      setPlayableBalanceSymbol(payload.symbol ?? "USDC");
+      setPlayableBalanceKind(payload.balanceKind ?? "wager_token");
+      setTokenMint(payload.tokenMint ?? null);
+      setGasBalance(payload.gasBalance ? trimBalance(payload.gasBalance) : null);
+      setGasBalanceSymbol(payload.gasSymbol ?? "SOL");
     } catch (err) {
-      setNativeBalance(null);
-      setNativeBalanceSymbol(null);
+      clearBalances();
       setError(err instanceof Error ? err.message : "Could not refresh wallet balance.");
     } finally {
       setNativeBalanceLoading(false);
     }
-  }, [primaryWallet]);
+  }, [clearBalances, solanaWallet]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -133,8 +144,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (res.status === 401) {
         setUser(null);
         setWallets([]);
-        setNativeBalance(null);
-        setNativeBalanceSymbol(null);
+        clearBalances();
         setError(null);
         return;
       }
@@ -143,93 +153,103 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setUser(payload.user);
       setWallets(payload.wallets);
       setError(null);
-      await refreshNativeBalance(payload.wallets[0] ?? null);
+      await refreshNativeBalance(selectSolanaWallet(payload.wallets));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load session.");
     } finally {
       setLoading(false);
     }
-  }, [refreshNativeBalance]);
+  }, [clearBalances, refreshNativeBalance]);
 
   useEffect(() => {
     void refresh();
   }, []);
 
-  const signInEvm = useCallback(async () => {
-    if (!evmAccount.address) {
-      openConnectModal?.();
-      throw new Error("Choose an EVM wallet to continue.");
+  const verifySolanaWallet = useCallback(async () => {
+    if (!solanaAdapter.publicKey || !solanaAdapter.signMessage) {
+      throw new Error("Choose a Solana wallet to continue.");
     }
     setError(null);
-    const chainId = `eip155:${evmChainId}`;
-    const challenge = await createChallenge({
-      chainType: "evm",
-      chainId,
-      address: evmAccount.address,
-    });
-    const signature = await signMessageAsync({ message: challenge.message });
-    await verifySignedChallenge({
-      challengeId: challenge.challengeId,
-      chainType: "evm",
-      chainId,
-      address: evmAccount.address,
-      signature,
-    });
-    await refresh();
-  }, [evmAccount.address, evmChainId, openConnectModal, refresh, signMessageAsync]);
-
-  const signInSolana = useCallback(async () => {
-    const provider = window.solana;
-    if (!provider?.isPhantom) throw new Error("Install Phantom to sign in with Solana.");
-    setError(null);
-    const connected = await provider.connect();
-    const address = connected.publicKey.toString();
+    const address = solanaAdapter.publicKey.toString();
     setSolanaAddress(address);
     const challenge = await createChallenge({
       chainType: "solana",
-      chainId: SOLANA_CHAIN_ID,
+      chainId: SOLANA_CONFIG.chainId,
       address,
     });
     const encoded = new TextEncoder().encode(challenge.message);
-    const signed = await provider.signMessage(encoded, "utf8");
+    await waitForWalletUi();
+    const signature = await solanaAdapter.signMessage(encoded);
     await verifySignedChallenge({
       challengeId: challenge.challengeId,
       chainType: "solana",
-      chainId: SOLANA_CHAIN_ID,
+      chainId: SOLANA_CONFIG.chainId,
       address,
-      signature: bs58.encode(signed.signature),
+      signature: bs58.encode(signature),
     });
     await refresh();
-  }, [refresh]);
+  }, [refresh, solanaAdapter.publicKey, solanaAdapter.signMessage]);
 
-  const signIn = useCallback(async () => {
-    if (solanaAddress) {
-      await signInSolana();
+  const signInSolana = useCallback(async () => {
+    if (!solanaAdapter.publicKey || !solanaAdapter.signMessage) {
+      setSolanaWalletModalVisible(true);
       return;
     }
-    await signInEvm();
-  }, [signInEvm, signInSolana, solanaAddress]);
+    await verifySolanaWallet();
+  }, [setSolanaWalletModalVisible, solanaAdapter.publicKey, solanaAdapter.signMessage, verifySolanaWallet]);
+
+  const signIn = useCallback(async () => {
+    await signInSolana();
+  }, [signInSolana]);
 
   const signOut = useCallback(async () => {
-    await api("/auth/logout", { method: "POST" });
-    if (evmAccount.isConnected) await disconnectAsync();
-    await window.solana?.disconnect?.();
+    setError(null);
+    setSolanaWalletModalVisible(false);
+
+    const evmDisconnects = evmConnections.length > 0
+      ? evmConnections.map((connection) => disconnectAsync({ connector: connection.connector }))
+      : evmAccount.isConnected
+        ? [disconnectAsync()]
+        : [];
+
+    const disconnectResults = await Promise.allSettled([
+      api("/auth/logout", { method: "POST" }),
+      ...evmDisconnects,
+      solanaAdapter.connected ? solanaAdapter.disconnect() : Promise.resolve(),
+    ]);
+    clearWalletConnectorStorage();
+
     setSolanaAddress(null);
     setUser(null);
     setWallets([]);
-    setBalanceState(null);
-    setNativeBalance(null);
-    setNativeBalanceSymbol(null);
-  }, [disconnectAsync, evmAccount.isConnected]);
+    clearBalances();
 
-  const setBalance = (n: number) => setBalanceState(n);
-  const deduct = (n: number) => {
-    if (balance == null) return false;
-    if (balance < n) return false;
-    setBalanceState((current) => +(current - n).toFixed(2));
-    return true;
-  };
-  const credit = (n: number) => setBalanceState((current) => (current == null ? null : +(current + n).toFixed(2)));
+    const failed = disconnectResults.some((result) => result.status === "rejected");
+    if (failed) {
+      setError("Wallet disconnected locally. Refresh once if your wallet extension still shows an active session.");
+    }
+  }, [
+    clearBalances,
+    disconnectAsync,
+    evmAccount.isConnected,
+    evmConnections,
+    setSolanaWalletModalVisible,
+    solanaAdapter,
+  ]);
+
+  const updateDisplayName = useCallback(async (displayName: string) => {
+    const res = await api("/auth/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ displayName }),
+    });
+    if (!res.ok) {
+      const payload = await safeJson(res);
+      throw new Error(payload?.message ?? "Could not save username.");
+    }
+    const payload = (await res.json()) as { user: AuthUser };
+    setUser(payload.user);
+    return payload.user;
+  }, []);
 
   const value = useMemo<AuthState>(
     () => ({
@@ -237,49 +257,56 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       wallets,
       loading,
       error,
-      balance,
-      nativeBalance,
-      nativeBalanceSymbol,
+      balance: null,
+      playableBalance,
+      playableBalanceSymbol,
+      playableBalanceKind,
+      tokenMint,
+      gasBalance,
+      gasBalanceSymbol,
+      nativeBalance: playableBalance,
+      nativeBalanceSymbol: playableBalanceSymbol,
       balanceLoading: nativeBalanceLoading,
       connected: !!user,
+      hasWalletConnection,
       primaryWallet,
+      solanaWallet,
       signIn,
-      signInEvm,
       signInSolana,
-      openEvmPicker: () => openConnectModal?.(),
       openSolanaPicker: async () => {
-        const provider = window.solana;
-        if (!provider?.isPhantom) throw new Error("Install Phantom to sign in with Solana.");
-        const connected = await provider.connect();
-        setSolanaAddress(connected.publicKey.toString());
+        setSolanaWalletModalVisible(true);
       },
       signOut,
       refresh,
+      updateDisplayName,
       evmWalletReady: Boolean(evmAccount.address),
       evmAddress: evmAccount.address ?? null,
-      solanaWalletReady: Boolean(solanaAddress),
-      solanaAddress,
-      setBalance,
-      deduct,
-      credit,
+      solanaWalletReady: Boolean(solanaAdapter.publicKey),
+      solanaAddress: solanaAdapter.publicKey?.toString() ?? solanaAddress,
     }),
     [
       user,
       wallets,
       loading,
       error,
-      balance,
-      nativeBalance,
-      nativeBalanceSymbol,
+      playableBalance,
+      playableBalanceSymbol,
+      playableBalanceKind,
+      tokenMint,
+      gasBalance,
+      gasBalanceSymbol,
       nativeBalanceLoading,
+      hasWalletConnection,
       primaryWallet,
+      solanaWallet,
       signIn,
-      signInEvm,
       signInSolana,
       signOut,
       refresh,
-      openConnectModal,
+      updateDisplayName,
+      setSolanaWalletModalVisible,
       evmAccount.address,
+      solanaAdapter.publicKey,
       solanaAddress,
     ],
   );
@@ -356,8 +383,47 @@ export function formatSOL(usd: number | null) {
 }
 
 export function formatNativeBalance(amount: string | null, symbol: string | null) {
-  if (!amount || !symbol) return "0.0000";
-  return `${amount} ${symbol}`;
+  if (amount == null || amount === "") return `0 ${symbol ?? "USDC"}`;
+  return `${amount} ${symbol ?? "USDC"}`;
+}
+
+/** Primary lobby number: wager-token balance available for match buy-ins. */
+export function formatPlayableBalance(amount: string | null, symbol: string | null) {
+  return formatNativeBalance(amount, symbol);
+}
+
+function clearWalletConnectorStorage() {
+  if (typeof window === "undefined") return;
+  const prefixes = [
+    "wagmi",
+    "rk-",
+    "rainbowkit",
+    "wc@2:",
+    "walletconnect",
+    "reown",
+    "@appkit",
+    "solana-wallet",
+  ];
+
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    for (let i = storage.length - 1; i >= 0; i--) {
+      const key = storage.key(i);
+      if (!key) continue;
+      const normalized = key.toLowerCase();
+      if (prefixes.some((prefix) => normalized.startsWith(prefix) || normalized.includes(prefix))) {
+        storage.removeItem(key);
+      }
+    }
+  }
+}
+
+function selectSolanaWallet(wallets: AuthWallet[]) {
+  return wallets.find((wallet) => wallet.chainType === "solana") ?? null;
+}
+
+function waitForWalletUi() {
+  if (typeof window === "undefined") return Promise.resolve();
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 250));
 }
 
 function trimBalance(value: string) {

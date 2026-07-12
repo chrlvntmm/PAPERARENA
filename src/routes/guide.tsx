@@ -134,7 +134,7 @@ function GuidePage() {
                 <div>
                   <div className="font-display text-xs tracking-wider text-white/60 mb-2">UNCLAIMED POT & PLATFORM FEE NOTICE</div>
                   <p className="text-white/50 text-xs leading-relaxed">
-                    If less than 100% of the map is claimed when the timer ends, or if the last remaining player self-eliminates before the match concludes, all remaining unclaimed funds are permanently forfeited to The House (the platform). These retained unclaimed funds, alongside the standard 5% platform fee deducted from payouts, are strictly utilized by the platform owner to keep the gaming servers running smoothly, fund future development updates, maintain security infrastructure, and optimize the overall user experience.
+                    If less than 100% of the map is claimed when the timer ends, or if the last remaining player self-eliminates before the match concludes, all remaining unclaimed funds are permanently forfeited to The House (the platform). These retained unclaimed funds, alongside the standard 2% platform fee deducted from payouts, are strictly utilized by the platform owner to keep the gaming servers running smoothly, fund future development updates, maintain security infrastructure, and optimize the overall user experience.
                   </p>
                 </div>
               </div>
@@ -169,7 +169,7 @@ function GuidePage() {
                   <h3 className="font-display text-sm tracking-[0.2em] text-white font-bold">CASHING OUT</h3>
                 </div>
                 <p className="text-white/70 text-sm leading-relaxed mb-3">
-                  When you win a match, your territory value is automatically calculated. The 5% platform fee is deducted at the point of cash-out before the net amount is credited to your wallet.
+                  When you win a match, your territory value is calculated by the server. The 2% platform fee is applied on-chain at settlement; net payout is sent to your Solana wallet. There is no separate in-game balance to cash out — buy-ins are deposited per match from your wallet wager token.
                 </p>
                 <p className="text-white/60 text-xs leading-relaxed">
                   Click the purple <span className="text-[#818cf8] font-bold">"Cash Out"</span> button to simulate withdrawing winnings securely to a Web3 wallet such as Phantom or MetaMask.

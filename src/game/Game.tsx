@@ -121,8 +121,11 @@ export default function Game({
     };
 
     const resize = () => {
-      const w = Math.min(window.innerWidth - 320, 1200);
-      const h = window.innerHeight - 100;
+      const sidebarWidth = window.innerWidth >= 1024 ? 320 : 0;
+      const horizontalPad = window.innerWidth >= 640 ? 32 : 16;
+      const verticalReserve = window.innerWidth >= 1024 ? 100 : 360;
+      const w = Math.max(280, Math.min(window.innerWidth - sidebarWidth - horizontalPad, 1200));
+      const h = Math.max(360, window.innerHeight - verticalReserve);
       canvas.width = w;
       canvas.height = h;
       viewRef.current.w = w;
@@ -259,24 +262,24 @@ export default function Game({
   const exitWon = matchEnd?.isYou === true && exitPayout > 0;
 
   return (
-    <div className="min-h-screen w-full flex" style={{ background: "#0a0b0d" }}>
-      <div className="flex-1 flex items-center justify-center p-4 relative">
-        <canvas ref={canvasRef} className="block neon-border rounded" />
+    <div className="min-h-screen w-full flex flex-col lg:flex-row" style={{ background: "#0a0b0d" }}>
+      <div className="flex-1 flex items-center justify-center p-2 sm:p-4 relative min-w-0">
+        <canvas ref={canvasRef} className="block max-w-full neon-border rounded" />
 
         {isTerritory && !matchEnd && (
-          <div className="absolute top-6 left-1/2 -translate-x-1/2 px-6 py-2 rounded-md border backdrop-blur-md flex items-center gap-3" style={{ background: "rgba(10,11,13,0.6)", borderColor: timeMs < 30000 ? "#ff3a6b" : "#f4ff3a", boxShadow: `0 0 24px ${timeMs < 30000 ? "rgba(255,58,107,0.5)" : "rgba(244,255,58,0.35)"}` }}>
-            <span className="font-display text-[10px] tracking-[0.35em] text-white/70">TIME</span>
-            <span className="font-display text-3xl tabular-nums" style={{ color: timeMs < 30000 ? "#ff3a6b" : "#f4ff3a", textShadow: `0 0 14px ${timeMs < 30000 ? "#ff3a6b" : "#f4ff3a"}` }}>{timeStr}</span>
+          <div className="absolute top-3 sm:top-6 left-1/2 -translate-x-1/2 px-3 sm:px-6 py-2 rounded-md border backdrop-blur-md flex items-center gap-2 sm:gap-3" style={{ background: "rgba(10,11,13,0.6)", borderColor: timeMs < 30000 ? "#ff3a6b" : "#f4ff3a", boxShadow: `0 0 24px ${timeMs < 30000 ? "rgba(255,58,107,0.5)" : "rgba(244,255,58,0.35)"}` }}>
+            <span className="font-display text-[9px] sm:text-[10px] tracking-[0.22em] sm:tracking-[0.35em] text-white/70">TIME</span>
+            <span className="font-display text-2xl sm:text-3xl tabular-nums" style={{ color: timeMs < 30000 ? "#ff3a6b" : "#f4ff3a", textShadow: `0 0 14px ${timeMs < 30000 ? "#ff3a6b" : "#f4ff3a"}` }}>{timeStr}</span>
           </div>
         )}
 
         {spectating && !matchEnd && (
           <>
-            <div className="absolute top-6 left-6 flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/15 backdrop-blur-md" style={{ background: "rgba(10,11,13,0.55)" }}>
+            <div className="absolute top-3 sm:top-6 left-3 sm:left-6 flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/15 backdrop-blur-md" style={{ background: "rgba(10,11,13,0.55)" }}>
               <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: "#ff3a6b", boxShadow: "0 0 10px #ff3a6b" }} />
               <span className="font-display text-[11px] tracking-[0.35em] text-white/90">SPECTATING LIVE</span>
             </div>
-            <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
+            <div className="absolute bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2">
               <button
                 onClick={() => { playClickSound(); onExit({ won: false, payout: 0 }); }}
                 className="px-7 py-3 rounded-md font-display tracking-[0.25em] text-xs border backdrop-blur-md transition hover:scale-[1.03]"
@@ -294,9 +297,9 @@ export default function Game({
         )}
 
         {showLostModal && !matchEnd && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md z-30 p-6">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md z-30 p-3 sm:p-6">
             <div
-              className="rounded-[36px] px-8 py-10 border max-w-[420px] w-full"
+              className="rounded-[28px] sm:rounded-[36px] px-4 sm:px-8 py-8 sm:py-10 border max-w-[min(92vw,420px)] w-full overflow-hidden"
               style={{
                 background: "#0a0b0d",
                 borderColor: "rgba(244,255,58,0.55)",
@@ -305,12 +308,12 @@ export default function Game({
             >
               <div className="text-center">
                 <div
-                  className="font-display text-5xl md:text-6xl mb-3"
-                  style={{ color: "#ff2a3d", textShadow: "0 0 18px rgba(255,42,61,0.85), 0 0 42px rgba(255,42,61,0.55)", letterSpacing: "0.08em" }}
+                  className="font-display mb-3"
+                  style={{ color: "#ff2a3d", textShadow: "0 0 18px rgba(255,42,61,0.85), 0 0 42px rgba(255,42,61,0.55)", letterSpacing: "0.06em", fontSize: "clamp(2.35rem, 13vw, 3.75rem)", lineHeight: 0.95 }}
                 >
                   YOU LOST
                 </div>
-                <div className="font-display text-xs md:text-sm tracking-[0.35em] text-white mb-8">
+                <div className="font-display text-[11px] md:text-sm tracking-[0.18em] md:tracking-[0.35em] text-white mb-8">
                   {lostStats?.cause === 'killed' ? "YOU GOT KILLED" : "YOU KILLED YOURSELF"}
                 </div>
               </div>
@@ -342,11 +345,11 @@ export default function Game({
                 />
               </div>
 
-              <div className="flex gap-3 mt-7 justify-center">
+              <div className="flex flex-col min-[420px]:flex-row gap-3 mt-7 justify-center">
                 {showSpectate && (
                   <button
                     onClick={() => { playClickSound(); setShowLostModal(false); enterSpectateRef.current(); }}
-                    className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.25em] text-[11px] border transition hover:scale-[1.03] flex items-center justify-center gap-2"
+                    className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.16em] sm:tracking-[0.25em] text-[11px] border transition hover:scale-[1.03] flex items-center justify-center gap-2"
                     style={{
                       background: "#0a0b0d",
                       borderColor: "rgba(255,255,255,0.18)",
@@ -358,7 +361,7 @@ export default function Game({
                 )}
                 <button
                   onClick={() => { playClickSound(); onExit({ won: false, payout: 0 }); }}
-                  className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.25em] text-[11px] border transition hover:scale-[1.03]"
+                  className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.16em] sm:tracking-[0.25em] text-[11px] border transition hover:scale-[1.03]"
                   style={{
                     background: "#0a0b0d",
                     borderColor: "rgba(255,255,255,0.18)",
@@ -467,7 +470,7 @@ export default function Game({
                     value={`$${matchEnd.mapValue.toFixed(2)}`}
                   />
                   <StatRow
-                    twoLine={["YOUR PRIZE", "- PLATFORM FEE (5%)"]}
+                    twoLine={["YOUR PRIZE", "- PLATFORM FEE (2%)"]}
                     value={`$${matchEnd.netPayout.toFixed(2)}`}
                     valueColor="#f4ff3a"
                     valueShadow="0 0 14px rgba(244,255,58,0.7)"
@@ -494,16 +497,16 @@ export default function Game({
         })()}
       </div>
 
-      <aside className="w-[320px] border-l border-border/50 p-5 flex flex-col gap-5" style={{ background: "#0c0d10" }}>
-        <div className="flex flex-col items-center text-center">
+      <aside className="w-full lg:w-[320px] lg:h-screen border-t lg:border-t-0 lg:border-l border-border/50 p-3 sm:p-5 flex flex-col gap-4 lg:gap-5 overflow-visible lg:overflow-hidden" style={{ background: "#0c0d10" }}>
+        <div className="hidden lg:flex flex-col items-center text-center">
           <img src={logoAsset.url} alt="PaperArena" className="w-full h-auto object-contain" />
           <div className="font-display text-[10px] tracking-[0.35em] text-white/60 mt-1">{"\n"}</div>
         </div>
-        <div className="text-center font-display tracking-[0.35em] text-white text-base uppercase">
+        <div className="text-center font-display tracking-[0.18em] lg:tracking-[0.35em] text-white text-sm lg:text-base uppercase break-words">
           {arenaLabel(players)}
         </div>
         <div
-          className="rounded-2xl px-4 py-3 grid grid-cols-3"
+          className="rounded-2xl px-3 sm:px-4 py-3 grid grid-cols-3 gap-2"
           style={{
             background: "linear-gradient(180deg, rgba(20,22,26,0.95) 0%, rgba(14,15,18,0.95) 100%)",
             border: "1px solid rgba(255,255,255,0.08)",
@@ -511,17 +514,17 @@ export default function Game({
           }}
         >
           <div className="flex flex-col items-start">
-            <div className="font-display text-[9px] tracking-[0.2em] text-white/70">MAP VALUE</div>
+            <div className="font-display text-[8px] sm:text-[9px] tracking-[0.12em] sm:tracking-[0.2em] text-white/70">MAP VALUE</div>
             <div className="font-mono font-bold text-base mt-1 tabular-nums" style={{ color: "#f4ff3a", textShadow: "0 0 10px rgba(244,255,58,0.6)" }}>
               ${state?.totalPot.toFixed(2) ?? "0.00"}
             </div>
           </div>
           <div className="flex flex-col items-center border-x border-white/10">
-            <div className="font-display text-[9px] tracking-[0.2em] text-white/70">WAGER</div>
+            <div className="font-display text-[8px] sm:text-[9px] tracking-[0.12em] sm:tracking-[0.2em] text-white/70">WAGER</div>
             <div className="font-mono font-bold text-base mt-1 text-white tabular-nums">${wager.toFixed(2)}</div>
           </div>
           <div className="flex flex-col items-end">
-            <div className="font-display text-[9px] tracking-[0.2em] text-white/70">PLAYERS ALIVE</div>
+            <div className="font-display text-[8px] sm:text-[9px] tracking-[0.12em] sm:tracking-[0.2em] text-white/70">PLAYERS ALIVE</div>
             <div className="font-mono font-bold text-base mt-1 text-white tabular-nums">{snapshot.survivors}/{players}</div>
           </div>
         </div>
@@ -529,7 +532,7 @@ export default function Game({
           <div className="font-display text-[12px] tracking-[0.18em] text-white">LIVE ARENA LEADERBOARD</div>
           <PodiumIcon />
         </div>
-        <div className="flex-1 overflow-auto space-y-2 pr-1">
+        <div className="lg:flex-1 max-h-[42vh] lg:max-h-none overflow-auto space-y-2 pr-1">
           {sorted.map((p, idx) => {
             const rank = idx + 1;
             const pct = pctFor(p.id);

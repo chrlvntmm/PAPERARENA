@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import { CONFIG, type ArenaType, type WagerAmount } from "../config.js";
+import { settleMatchFunds } from "../auth/escrow.service.js";
 import type { ClientSession } from "../websocket/ClientSession.js";
 import type { QueueEntry } from "../lobby/MatchmakingQueue.js";
 import type { EliminationPayload, MatchEndPayload } from "../types/protocol.js";
@@ -21,6 +22,7 @@ export class Match {
   private sessions = new Map<string, ClientSession>();
   private sessionToPlayer = new Map<string, number>();
   private playerToSession = new Map<number, string>();
+  private playerWallets = new Map<number, string>();
   private pendingInputs = new Map<number, Dir>();
   private logicAcc = 0;
   private movementTickAcc = 0;
@@ -32,6 +34,8 @@ export class Match {
   private disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private preDeathCounts = new Map<number, number>();
   private onEnd?: () => void;
+  private onChainMatchIdHex?: string;
+  private settlementStarted = false;
 
   constructor(
     arena: ArenaType,
@@ -63,9 +67,16 @@ export class Match {
       this.sessions.set(entry.session.id, entry.session);
       this.sessionToPlayer.set(entry.session.id, i);
       this.playerToSession.set(i, entry.session.id);
+      if (entry.session.walletAddress) {
+        this.playerWallets.set(i, entry.session.walletAddress);
+      }
       entry.session.matchId = this.id;
       entry.session.playerId = i;
     });
+  }
+
+  setOnChainMatchId(onChainMatchIdHex?: string) {
+    this.onChainMatchIdHex = onChainMatchIdHex;
   }
 
   start() {
@@ -259,7 +270,39 @@ export class Match {
       session.send({ type: "match_end", payload });
     }
 
+    void this.settleAfterEnd(counts, total);
     this.destroy();
+  }
+
+  private async settleAfterEnd(counts: number[], totalCells: number) {
+    if (this.settlementStarted) return;
+    this.settlementStarted = true;
+
+    const players = [...this.playerWallets.entries()].map(([playerIndex, walletAddress]) => {
+      const p = this.state.players[playerIndex];
+      return {
+        playerIndex,
+        walletAddress,
+        alive: Boolean(p?.alive),
+        territoryCells: counts[playerIndex] ?? 0,
+      };
+    });
+
+    if (players.length === 0) return;
+
+    try {
+      const result = await settleMatchFunds({
+        matchId: this.id,
+        onChainMatchIdHex: this.onChainMatchIdHex,
+        players,
+        totalCells,
+      });
+      if (!result.ok) {
+        console.error(`[match ${this.id}] settlement failed:`, result.reason);
+      }
+    } catch (error) {
+      console.error(`[match ${this.id}] settlement error:`, error);
+    }
   }
 
   private broadcastState() {
