@@ -155,10 +155,10 @@ function GuidePage() {
                   <h3 className="font-display text-sm tracking-[0.2em] text-white font-bold">ADDING FUNDS</h3>
                 </div>
                 <p className="text-white/70 text-sm leading-relaxed mb-3">
-                  During the playground phase, your account is pre-loaded with a temporary <span className="text-[#f4ff3a] font-mono font-bold">$500.00</span> testing balance.
+                  Connect your wallet (e.g. <span className="text-[#f4ff3a] font-bold">Phantom</span>, <span className="text-[#f4ff3a] font-bold">Metamask</span> or <span className="text-[#f4ff3a] font-bold">Solflare</span>) and click the green <span className="text-[#22c55e] font-bold">"Add Funds"</span> button on the dashboard.
                 </p>
                 <p className="text-white/60 text-xs leading-relaxed">
-                  Click the green <span className="text-[#22c55e] font-bold">"Add Funds"</span> button on the dashboard to simulate a Solana (SOL) deposit. This refreshes your liquidity and updates both your USD and SOL balances in real time.
+                  Deposit SOL directly from your wallet to load your Paper Arena wallet balance in real-time.
                 </p>
                 <div className="mt-3 font-mono text-xs text-white/40">1 USD ≈ 0.014 SOL</div>
               </div>
@@ -169,14 +169,14 @@ function GuidePage() {
                   <h3 className="font-display text-sm tracking-[0.2em] text-white font-bold">CASHING OUT</h3>
                 </div>
                 <p className="text-white/70 text-sm leading-relaxed mb-3">
-                  When you win a match, your territory value is calculated by the server. The 2% platform fee is applied on-chain at settlement; net payout is sent to your Solana wallet. There is no separate in-game balance to cash out — buy-ins are deposited per match from your wallet wager token.
+                  When you win or conclude a match, your claimed territory value is automatically calculated. A minimal <span className="text-[#f4ff3a] font-bold">2% platform fee</span> is deducted at cash-out, and the net payout is immediately available to withdraw back to your Web3 wallet.
                 </p>
                 <p className="text-white/60 text-xs leading-relaxed">
                   Click the purple <span className="text-[#818cf8] font-bold">"Cash Out"</span> button to simulate withdrawing winnings securely to a Web3 wallet such as Phantom or MetaMask.
                 </p>
                 <div className="mt-3 rounded-lg p-2 border border-white/10" style={{ background: "rgba(255,255,255,0.03)" }}>
                   <div className="font-mono text-[10px] text-white/50">PRIZE FORMULA</div>
-                  <div className="font-mono text-xs text-white/80 mt-0.5">Net Payout = Captured Territory Value − 5% Platform Fee</div>
+                  <div className="font-mono text-xs text-white/80 mt-0.5">Net Payout = Captured Territory Value − 2% Platform Fee</div>
                 </div>
               </div>
             </div>

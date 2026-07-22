@@ -7,6 +7,7 @@ import { lockMatchFunds, reconcileMatchLock, verifyEscrowBuyIn } from "./auth/es
 import { Match } from "./game/Match.js";
 import { MatchManager } from "./game/MatchManager.js";
 import { handleHttpRequest } from "./http/auth.routes.js";
+import { handleOpsRequest } from "./http/ops.routes.js";
 import { checkRateLimit, cleanupRateLimitBuckets } from "./http/rate-limit.js";
 import { MatchmakingQueue } from "./lobby/MatchmakingQueue.js";
 import { ClientMessageSchema } from "./types/protocol.js";
@@ -27,8 +28,11 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
     ((req: IncomingMessage) => authenticateSessionToken(getSessionTokenFromCookie(req)));
   const verifyEscrow = options.verifyEscrow ?? verifyEscrowBuyIn;
 
+  let draining = false;
+
   const httpServer = createServer(async (req, res) => {
     try {
+      if (await handleOpsRequest(req, res)) return;
       const handled = await handleHttpRequest(req, res);
       if (!handled) {
         res.writeHead(404).end();
@@ -61,6 +65,15 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
         : { type: "auth_fail", reason: "No active session" },
     );
 
+    // Resume mid-match if this wallet is still within disconnect grace.
+    if (session.authenticated) {
+      const resumeKey = session.walletId ?? session.walletAddress ?? session.userId;
+      const active = matches.findByIdentity(resumeKey);
+      if (active?.tryReconnect(session)) {
+        // quiet in normal play
+      }
+    }
+
     ws.on("message", async (raw) => {
       try {
         let parsed: unknown;
@@ -88,6 +101,27 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
             if (!session.authenticated) {
               session.send({ type: "error", code: "UNAUTH", message: "Authenticate first" });
               return;
+            }
+            if (draining) {
+              session.send({
+                type: "error",
+                code: "SERVER_DRAINING",
+                message: "Server is restarting. New matches are paused — try again shortly.",
+              });
+              return;
+            }
+            if (session.matchId) {
+              session.send({
+                type: "error",
+                code: "IN_MATCH",
+                message: "Already in a match. Wait for it to finish.",
+              });
+              return;
+            }
+            const resumeKey = session.walletId ?? session.walletAddress ?? session.userId;
+            if (matches.findByIdentity(resumeKey)) {
+              const resumed = matches.findByIdentity(resumeKey)?.tryReconnect(session);
+              if (resumed) return;
             }
             if (!CONFIG.WAGERS.includes(msg.wager as WagerAmount)) {
               session.send({ type: "error", code: "BAD_WAGER", message: "Invalid wager" });
@@ -145,6 +179,7 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
               const match = new Match(locked.arena, locked.wager, locked.players, () => {
                 matches.remove(match.id);
               });
+              // Identities registered when matches.create runs.
 
               let fundLock = await lockMatchFunds({
                 matchId: match.id,
@@ -157,11 +192,10 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
                 })),
               });
 
-              // If chain/RPC state is unknown, do NOT free deposits or hard-fail yet —
-              // poll reconcile until locked, proven failed, or timeout (recovery continues after).
+              // Short pending poll only — recovery worker continues if still unknown.
               if (!fundLock.ok && fundLock.pending) {
-                for (let i = 0; i < 15; i++) {
-                  await new Promise((r) => setTimeout(r, 2000));
+                for (let i = 0; i < 6; i++) {
+                  await new Promise((r) => setTimeout(r, 750));
                   fundLock = await reconcileMatchLock(match.id);
                   if (fundLock.ok || !fundLock.pending) break;
                 }
@@ -229,6 +263,31 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
   const rateLimitCleanup = setInterval(cleanupRateLimitBuckets, CONFIG.RATE_LIMIT.WINDOW_MS);
   rateLimitCleanup.unref();
 
+  function setDraining(value: boolean) {
+    draining = value;
+  }
+
+  /**
+   * Production shutdown only:
+   * 1) stop new queues
+   * 2) force-end live matches (territory settle)
+   * 3) brief wait for async settlement to submit
+   * 4) close sockets
+   */
+  async function drainAndClose(options: { settleWaitMs?: number } = {}) {
+    const settleWaitMs = options.settleWaitMs ?? CONFIG.SHUTDOWN_DRAIN_MS;
+    setDraining(true);
+    const active = matches.activeCount();
+    if (active > 0) {
+      console.info(`[server] drain: ending ${active} live match(es)`);
+    }
+    matches.forceEndAll();
+    if (active > 0 && settleWaitMs > 0) {
+      await new Promise((r) => setTimeout(r, settleWaitMs));
+    }
+    await close();
+  }
+
   async function close() {
     clearInterval(rateLimitCleanup);
     matches.destroyAll();
@@ -242,6 +301,9 @@ export function createPaperArenaServer(options: PaperArenaServerOptions = {}) {
   return {
     httpServer,
     wss,
+    matches,
+    setDraining,
+    drainAndClose,
     close,
   };
 }

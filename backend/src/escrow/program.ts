@@ -15,6 +15,7 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
 } from "@solana/spl-token";
 import { CONFIG } from "../config.js";
+import { sendAndConfirmFast } from "./solana-send.js";
 
 export const DEPOSIT_STATUS = {
   Funded: 0,
@@ -233,13 +234,35 @@ export function decodeDepositEscrow(data: Buffer): OnChainDepositEscrow {
 
 export async function fetchDepositEscrow(
   intentIdHex: string,
+  commitment: "processed" | "confirmed" | "finalized" = "confirmed",
 ): Promise<{ pubkey: PublicKey; escrow: OnChainDepositEscrow } | null> {
   const program = getEscrowProgram();
   const intentId = intentIdFromHex(intentIdHex);
   const pubkey = depositPda(program.programId, intentId);
-  const info = await program.connection.getAccountInfo(pubkey, "confirmed");
+  // Prefer confirmed; callers may try processed first for lower latency after deposit lands.
+  const info = await program.connection.getAccountInfo(pubkey, commitment);
   if (!info || !info.owner.equals(program.programId)) return null;
   return { pubkey, escrow: decodeDepositEscrow(Buffer.from(info.data)) };
+}
+
+/** Poll until deposit PDA is readable. Real chain state only — no fake success. */
+export async function fetchDepositEscrowReady(
+  intentIdHex: string,
+  options: { attempts?: number; delayMs?: number } = {},
+): Promise<{ pubkey: PublicKey; escrow: OnChainDepositEscrow } | null> {
+  const attempts = options.attempts ?? 10;
+  const delayMs = options.delayMs ?? 350;
+  for (let i = 0; i < attempts; i++) {
+    // processed first (fast after client-side processed confirm), then confirmed.
+    const onChain =
+      (await fetchDepositEscrow(intentIdHex, "processed")) ??
+      (await fetchDepositEscrow(intentIdHex, "confirmed"));
+    if (onChain) return onChain;
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return null;
 }
 
 export type OnChainMatchStatus = "locked" | "settled" | "refunded" | "forfeited";
@@ -406,11 +429,6 @@ export function buildDepositInstruction(args: {
   });
 }
 
-/**
- * Resilient authority send: fresh blockhash, and does not fail if the tx
- * actually landed after a "block height exceeded" confirm race (common on devnet RPC).
- * Only re-sends if the previous signature never appeared on-chain.
- */
 async function sendAndConfirmAuthorityTx(
   connection: Connection,
   tx: Transaction,
@@ -418,125 +436,13 @@ async function sendAndConfirmAuthorityTx(
   label: string,
   onSubmitted?: (signature: string) => Promise<void> | void,
 ): Promise<string> {
-  const feePayer = signers[0];
-  if (!feePayer) throw new Error(`${label}: missing fee payer signer.`);
-
-  let lastError: unknown;
-  let signature: string | undefined;
-  let submittedHookFired = false;
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      if (!signature) {
-        const { blockhash, lastValidBlockHeight } =
-          await connection.getLatestBlockhash("finalized");
-        // Clone instructions into a fresh tx each send (avoids stale signature state).
-        const fresh = new Transaction();
-        for (const ix of tx.instructions) fresh.add(ix);
-        fresh.feePayer = feePayer.publicKey;
-        fresh.recentBlockhash = blockhash;
-        fresh.lastValidBlockHeight = lastValidBlockHeight;
-        fresh.partialSign(...signers);
-
-        signature = await connection.sendRawTransaction(fresh.serialize(), {
-          skipPreflight: false,
-          preflightCommitment: "confirmed",
-          maxRetries: 5,
-        });
-        console.info(`[escrow] ${label} submitted`, { signature, attempt });
-
-        // Persist signature before confirm wait so recovery can reconcile.
-        if (onSubmitted && !submittedHookFired) {
-          submittedHookFired = true;
-          await onSubmitted(signature);
-        }
-
-        try {
-          const conf = await connection.confirmTransaction(
-            { signature, blockhash, lastValidBlockHeight },
-            "confirmed",
-          );
-          if (conf.value.err) {
-            throw new Error(`${label} failed on-chain: ${JSON.stringify(conf.value.err)}`);
-          }
-          return signature;
-        } catch (confirmError) {
-          lastError = confirmError;
-        }
-      }
-
-      // confirmTransaction often throws "block height exceeded" even when the tx landed.
-      const landed = await waitForSignatureLanded(connection, signature, 25_000);
-      if (landed === "ok") {
-        console.info(`[escrow] ${label} confirmed via status poll`, { signature });
-        return signature;
-      }
-      if (landed === "err") {
-        throw new Error(`${label} failed on-chain (signature ${signature}).`);
-      }
-
-      console.warn(`[escrow] ${label} signature not found yet; will re-send`, {
-        signature,
-        attempt,
-        error: lastError instanceof Error ? lastError.message : String(lastError),
-      });
-      signature = undefined;
-      submittedHookFired = false;
-      await sleep(500 * attempt);
-    } catch (error) {
-      lastError = error;
-      console.warn(`[escrow] ${label} attempt ${attempt} failed`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // Keep signature if we already submitted — next loop polls it first.
-      if (!signature) {
-        await sleep(500 * attempt);
-      } else {
-        const landed = await waitForSignatureLanded(connection, signature, 8_000);
-        if (landed === "ok") return signature;
-        if (landed === "err") {
-          signature = undefined;
-          submittedHookFired = false;
-        }
-        await sleep(500 * attempt);
-      }
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`${label} failed after retries.`);
-}
-
-async function waitForSignatureLanded(
-  connection: Connection,
-  signature: string,
-  timeoutMs: number,
-): Promise<"ok" | "err" | "unknown"> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const statuses = await connection.getSignatureStatuses([signature], {
-      searchTransactionHistory: true,
-    });
-    const status = statuses.value[0];
-    if (status?.err) return "err";
-    if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
-      return "ok";
-    }
-    const tx = await connection.getTransaction(signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
-    });
-    if (tx) {
-      return tx.meta?.err ? "err" : "ok";
-    }
-    await sleep(500);
-  }
-  return "unknown";
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return sendAndConfirmFast(connection, tx, signers, {
+    label,
+    maxAttempts: 2,
+    pollMs: 350,
+    pollTimeoutMs: 12_000,
+    onSubmitted,
+  });
 }
 
 export async function lockMatchOnChain(args: {
@@ -578,6 +484,59 @@ export async function lockMatchOnChain(args: {
     tx,
     [program.gameAuthority],
     "lock_match",
+    args.onSubmitted,
+  );
+}
+
+/**
+ * Refund a Funded deposit back to the player ATA.
+ * Signed by game authority (allowed anytime while Funded).
+ * On-chain enforces: status must be Funded — Consumed/Refunded cannot refund.
+ */
+export async function refundDepositOnChain(args: {
+  intentIdHex: string;
+  player: PublicKey;
+  onSubmitted?: (signature: string) => Promise<void> | void;
+}): Promise<string> {
+  const program = getEscrowProgram();
+  if (!program.gameAuthority) {
+    throw new Error("ESCROW_GAME_AUTHORITY_SECRET is required to refund deposits.");
+  }
+
+  const intentId = intentIdFromHex(args.intentIdHex);
+  const depositEscrow = depositPda(program.programId, intentId);
+  const playerAta = getAssociatedTokenAddressSync(program.tokenMint, args.player, false);
+  const authority = program.gameAuthority;
+
+  const data = Buffer.alloc(8);
+  anchorDiscriminator("refund_deposit").copy(data, 0);
+
+  const tx = new Transaction().add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      authority.publicKey,
+      playerAta,
+      args.player,
+      program.tokenMint,
+    ),
+    new TransactionInstruction({
+      programId: program.programId,
+      keys: [
+        { pubkey: authority.publicKey, isSigner: true, isWritable: false },
+        { pubkey: program.configPda, isSigner: false, isWritable: false },
+        { pubkey: depositEscrow, isSigner: false, isWritable: true },
+        { pubkey: program.vaultPda, isSigner: false, isWritable: true },
+        { pubkey: playerAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    }),
+  );
+
+  return sendAndConfirmAuthorityTx(
+    program.connection,
+    tx,
+    [authority],
+    "refund_deposit",
     args.onSubmitted,
   );
 }

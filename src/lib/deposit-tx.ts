@@ -42,17 +42,58 @@ function writeI64LE(buf: Buffer, offset: number, value: bigint) {
   buf.writeBigInt64LE(value, offset);
 }
 
+function isBlockhashError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /blockhash not found|block height exceeded|expired/i.test(msg);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Poll until processed/confirmed — real chain status, not a fake success. */
+async function waitForSig(
+  connection: Connection,
+  signature: string,
+  timeoutMs = 12_000,
+): Promise<"ok" | "err" | "unknown"> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const statuses = await connection.getSignatureStatuses([signature], {
+        searchTransactionHistory: true,
+      });
+      const st = statuses.value[0];
+      if (st?.err) return "err";
+      if (
+        st?.confirmationStatus === "processed" ||
+        st?.confirmationStatus === "confirmed" ||
+        st?.confirmationStatus === "finalized"
+      ) {
+        return "ok";
+      }
+    } catch {
+      /* keep polling */
+    }
+    await sleep(250);
+  }
+  return "unknown";
+}
+
 export async function sendDepositTransaction(args: {
   build: DepositBuildParams;
   playerPublicKey: PublicKey;
   signTransaction: (tx: Transaction) => Promise<Transaction>;
 }): Promise<string> {
-  const connection = new Connection(SOLANA_CONFIG.rpcUrl, "confirmed");
+  const connection = new Connection(SOLANA_CONFIG.rpcUrl, {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 12_000,
+  });
   const programId = new PublicKey(args.build.programId);
   const configPda = new PublicKey(args.build.configPda);
   const vaultPda = new PublicKey(args.build.vaultPda);
   const tokenMint = new PublicKey(args.build.tokenMint);
-  const depositPda = new PublicKey(args.build.depositPda);
+  const depositPdaKey = new PublicKey(args.build.depositPda);
   const playerAta = getAssociatedTokenAddressSync(tokenMint, args.playerPublicKey, false);
 
   const intentId = hexToBytes(args.build.onChainIntentId);
@@ -72,7 +113,7 @@ export async function sendDepositTransaction(args: {
     keys: [
       { pubkey: args.playerPublicKey, isSigner: true, isWritable: true },
       { pubkey: configPda, isSigner: false, isWritable: false },
-      { pubkey: depositPda, isSigner: false, isWritable: true },
+      { pubkey: depositPdaKey, isSigner: false, isWritable: true },
       { pubkey: tokenMint, isSigner: false, isWritable: false },
       { pubkey: playerAta, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
@@ -82,66 +123,53 @@ export async function sendDepositTransaction(args: {
     data,
   });
 
-  const tx = new Transaction();
-  tx.add(
-    createAssociatedTokenAccountIdempotentInstruction(
-      args.playerPublicKey,
-      playerAta,
-      args.playerPublicKey,
-      tokenMint,
-    ),
-    depositIx,
-  );
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const tx = new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          args.playerPublicKey,
+          playerAta,
+          args.playerPublicKey,
+          tokenMint,
+        ),
+        depositIx,
+      );
 
-  // Fresh blockhash immediately before sign+send (wallet UI delay can burn old ones).
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("finalized");
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = args.playerPublicKey;
-  tx.lastValidBlockHeight = lastValidBlockHeight;
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      tx.feePayer = args.playerPublicKey;
+      tx.recentBlockhash = blockhash;
 
-  const signed = await args.signTransaction(tx);
-  const signature = await connection.sendRawTransaction(signed.serialize(), {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-    maxRetries: 3,
-  });
+      const signed = await args.signTransaction(tx);
+      const signature = await connection.sendRawTransaction(signed.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+        maxRetries: 2,
+      });
 
-  // If confirm throws "block height exceeded", the tx may still have landed.
-  // Always check signature status before treating it as a hard failure.
-  try {
-    const conf = await connection.confirmTransaction(
-      { signature, blockhash, lastValidBlockHeight },
-      "confirmed",
-    );
-    if (conf.value.err) {
-      throw new Error(`Deposit transaction failed on-chain: ${JSON.stringify(conf.value.err)}`);
+      const landed = await waitForSig(connection, signature, 12_000);
+      if (landed === "ok") return signature;
+      if (landed === "err") {
+        throw new Error("Deposit transaction failed on-chain.");
+      }
+
+      // One more deep check before failing.
+      const txInfo = await connection.getTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (txInfo && !txInfo.meta?.err) return signature;
+      throw new Error("Deposit confirmation timed out. Check explorer before retrying.");
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2 && isBlockhashError(error)) continue;
+      throw error instanceof Error
+        ? error
+        : new Error("Deposit transaction failed. Please try again.");
     }
-  } catch (error) {
-    const statuses = await connection.getSignatureStatuses([signature], {
-      searchTransactionHistory: true,
-    });
-    const status = statuses.value[0];
-    if (status?.err) {
-      throw new Error(`Deposit transaction failed on-chain: ${JSON.stringify(status.err)}`);
-    }
-    if (
-      status?.confirmationStatus === "confirmed" ||
-      status?.confirmationStatus === "finalized"
-    ) {
-      return signature;
-    }
-    // Last resort: fetch parsed tx
-    const txInfo = await connection.getTransaction(signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
-    });
-    if (txInfo && !txInfo.meta?.err) {
-      return signature;
-    }
-    throw error instanceof Error
-      ? error
-      : new Error("Deposit confirmation timed out. Check explorer before retrying.");
   }
 
-  return signature;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Deposit transaction failed. Please try again.");
 }

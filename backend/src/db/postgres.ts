@@ -359,6 +359,7 @@ export const db = {
          and status = 'verified'
          and consumed_at is null
          and expires_at > $4
+         and verification_error is distinct from 'refunding'
          and ($5::uuid is null or user_id = $5)
          and ($6::uuid is null or wallet_id = $6)`,
       [
@@ -387,6 +388,142 @@ export const db = {
     return result.rowCount === 1;
   },
 
+  /**
+   * Soft-claim a deposit for refund (concurrency guard).
+   * Only refundable DB statuses; never consumed / refunded / forfeited.
+   */
+  async claimDepositIntentForRefund(args: {
+    id: string;
+    userId: string;
+    walletId: string;
+    claimedAt: Date;
+    staleBefore: Date;
+  }) {
+    const result = await pool.query(
+      `update deposit_intents
+       set verification_error = 'refunding',
+           updated_at = $4
+       where id = $1
+         and user_id = $2
+         and wallet_id = $3
+         and consumed_at is null
+         and status = any($5::text[])
+         and (
+           verification_error is distinct from 'refunding'
+           or updated_at < $6
+         )
+       returning *`,
+      [
+        args.id,
+        args.userId,
+        args.walletId,
+        args.claimedAt,
+        ["verified", "awaiting_payment", "submitted", "expired", "failed"],
+        args.staleBefore,
+      ],
+    );
+    return result.rows[0] ? mapDepositIntent(result.rows[0] as Record<string, unknown>) : null;
+  },
+
+  async markDepositIntentRefunded(args: {
+    id: string;
+    updatedAt: Date;
+    /** Optional note; does not overwrite deposit tx_signature. */
+    note?: string | null;
+  }) {
+    const result = await pool.query(
+      `update deposit_intents
+       set status = 'refunded',
+           verification_error = $3,
+           consumed_at = null,
+           updated_at = $2
+       where id = $1
+         and status is distinct from 'refunded'`,
+      [args.id, args.updatedAt, args.note ?? null],
+    );
+    return result.rowCount === 1;
+  },
+
+  async clearDepositRefundClaim(args: { id: string; updatedAt: Date }) {
+    await pool.query(
+      `update deposit_intents
+       set verification_error = null,
+           updated_at = $2
+       where id = $1
+         and verification_error = 'refunding'
+         and status is distinct from 'refunded'`,
+      [args.id, args.updatedAt],
+    );
+  },
+
+  /** Active/finished match paths that must never be refunded at deposit level. */
+  async findBlockingMatchLocksForDeposit(depositIntentId: string) {
+    const result = await pool.query(
+      `select l.match_id, l.status, l.on_chain_match_id_hex, l.updated_at
+       from match_fund_lock_players p
+       join match_fund_locks l on l.id = p.match_fund_lock_id
+       where p.deposit_intent_id = $1
+         and l.status = any($2::text[])
+       order by l.updated_at desc
+       limit 5`,
+      [
+        depositIntentId,
+        ["created", "locked", "settling", "settled", "forfeiting", "forfeited"],
+      ],
+    );
+    return result.rows.map((row) => {
+      const r = row as Record<string, unknown>;
+      return {
+        matchId: String(r.match_id),
+        status: String(r.status),
+        onChainMatchIdHex: r.on_chain_match_id_hex
+          ? String(r.on_chain_match_id_hex)
+          : undefined,
+        updatedAt: r.updated_at as Date,
+      };
+    });
+  },
+
+  async findRefundableDepositIntents(args: {
+    userId: string;
+    walletId: string;
+    limit?: number;
+  }) {
+    const result = await pool.query(
+      `select *
+       from deposit_intents
+       where user_id = $1
+         and wallet_id = $2
+         and consumed_at is null
+         and status = any($3::text[])
+       order by created_at desc
+       limit $4`,
+      [
+        args.userId,
+        args.walletId,
+        ["verified", "awaiting_payment", "submitted", "expired"],
+        args.limit ?? 20,
+      ],
+    );
+    return result.rows.map((row) => mapDepositIntent(row as Record<string, unknown>));
+  },
+
+  /** Expired unused deposits for recovery auto-refund (DB expired or past expires_at). */
+  async findExpiredUnusedDepositsForRefund(args: { olderThan: Date; limit?: number }) {
+    const result = await pool.query(
+      `select *
+       from deposit_intents
+       where consumed_at is null
+         and status = any($1::text[])
+         and expires_at < $2
+         and (verification_error is distinct from 'refunding' or updated_at < $2)
+       order by expires_at asc
+       limit $3`,
+      [["verified", "awaiting_payment", "submitted", "expired"], args.olderThan, args.limit ?? 20],
+    );
+    return result.rows.map((row) => mapDepositIntent(row as Record<string, unknown>));
+  },
+
   async consumeVerifiedDepositIntentsAtomic(args: {
     ids: string[];
     arena: string;
@@ -408,7 +545,8 @@ export const db = {
              and wager_usd = $3
              and status = 'verified'
              and consumed_at is null
-             and expires_at > $4`,
+             and expires_at > $4
+             and verification_error is distinct from 'refunding'`,
           [id, args.arena, args.wagerUsd, args.consumedAt],
         );
         if (result.rowCount !== 1) {

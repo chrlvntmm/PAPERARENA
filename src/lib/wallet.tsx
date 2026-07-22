@@ -55,7 +55,15 @@ interface AuthState {
   signInSolana: () => Promise<void>;
   openSolanaPicker: () => Promise<void>;
   signOut: () => Promise<void>;
+  /** Full session + balance. Prefer refreshBalance after matches (avoids lobby "loading" flash). */
   refresh: () => Promise<void>;
+  /** Playable token balance only — does not flip session loading. */
+  refreshBalance: () => Promise<void>;
+  /**
+   * Efficient post-match balance refresh.
+   * One visible read; quiet retries only if a payout is expected and balance hasn't moved yet.
+   */
+  refreshBalanceAfterMatch: (options?: { expectPayout?: boolean }) => Promise<void>;
   updateDisplayName: (displayName: string) => Promise<AuthUser>;
   evmWalletReady: boolean;
   evmAddress: string | null;
@@ -102,40 +110,52 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setGasBalanceSymbol(null);
   }, []);
 
-  const refreshNativeBalance = useCallback(async (wallet: AuthWallet | null = solanaWallet) => {
-    if (!wallet || wallet.chainType !== "solana") {
-      clearBalances();
-      return;
-    }
-
-    setNativeBalanceLoading(true);
-    try {
-      const res = await api(`/wallet/balance?walletId=${encodeURIComponent(wallet.id)}`, { method: "GET" });
-      if (!res.ok) {
-        const payload = await safeJson(res);
-        throw new Error(payload?.message ?? "Could not refresh wallet balance.");
+  const refreshNativeBalance = useCallback(
+    async (
+      wallet: AuthWallet | null = solanaWallet,
+      options: { quiet?: boolean } = {},
+    ): Promise<string | null> => {
+      if (!wallet || wallet.chainType !== "solana") {
+        clearBalances();
+        return null;
       }
-      const payload = (await res.json()) as {
-        balance: string;
-        symbol: string;
-        balanceKind?: "wager_token" | "native";
-        tokenMint?: string;
-        gasBalance?: string;
-        gasSymbol?: string;
-      };
-      setPlayableBalance(trimBalance(payload.balance));
-      setPlayableBalanceSymbol(payload.symbol ?? "USDC");
-      setPlayableBalanceKind(payload.balanceKind ?? "wager_token");
-      setTokenMint(payload.tokenMint ?? null);
-      setGasBalance(payload.gasBalance ? trimBalance(payload.gasBalance) : null);
-      setGasBalanceSymbol(payload.gasSymbol ?? "SOL");
-    } catch (err) {
-      clearBalances();
-      setError(err instanceof Error ? err.message : "Could not refresh wallet balance.");
-    } finally {
-      setNativeBalanceLoading(false);
-    }
-  }, [clearBalances, solanaWallet]);
+
+      if (!options.quiet) setNativeBalanceLoading(true);
+      try {
+        const res = await api(`/wallet/balance?walletId=${encodeURIComponent(wallet.id)}`, {
+          method: "GET",
+        });
+        if (!res.ok) {
+          const payload = await safeJson(res);
+          throw new Error(payload?.message ?? "Could not refresh wallet balance.");
+        }
+        const payload = (await res.json()) as {
+          balance: string;
+          symbol: string;
+          balanceKind?: "wager_token" | "native";
+          tokenMint?: string;
+          gasBalance?: string;
+          gasSymbol?: string;
+        };
+        const next = trimBalance(payload.balance);
+        setPlayableBalance(next);
+        setPlayableBalanceSymbol(payload.symbol ?? "USDC");
+        setPlayableBalanceKind(payload.balanceKind ?? "wager_token");
+        setTokenMint(payload.tokenMint ?? null);
+        setGasBalance(payload.gasBalance ? trimBalance(payload.gasBalance) : null);
+        setGasBalanceSymbol(payload.gasSymbol ?? "SOL");
+        setError(null);
+        return next;
+      } catch (err) {
+        // Keep last known balance on transient RPC errors (esp. post-match polls).
+        setError(err instanceof Error ? err.message : "Could not refresh wallet balance.");
+        return null;
+      } finally {
+        if (!options.quiet) setNativeBalanceLoading(false);
+      }
+    },
+    [clearBalances, solanaWallet],
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -160,6 +180,32 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setLoading(false);
     }
   }, [clearBalances, refreshNativeBalance]);
+
+  const refreshBalance = useCallback(async () => {
+    await refreshNativeBalance();
+  }, [refreshNativeBalance]);
+
+  /**
+   * One visible refresh. Quiet retries only when a payout is expected and balance
+   * hasn't changed yet — stop as soon as it updates (or after 2 quiet tries).
+   */
+  const refreshBalanceAfterMatch = useCallback(
+    async (options: { expectPayout?: boolean } = {}) => {
+      const before = playableBalance;
+      const first = await refreshNativeBalance(solanaWallet, { quiet: false });
+      // Balance already moved, or no payout expected (loss / no settle lag) — done.
+      if (!options.expectPayout) return;
+      if (first != null && first !== before) return;
+
+      await new Promise((r) => setTimeout(r, 2_500));
+      const second = await refreshNativeBalance(solanaWallet, { quiet: true });
+      if (second != null && second !== before) return;
+
+      await new Promise((r) => setTimeout(r, 4_000));
+      await refreshNativeBalance(solanaWallet, { quiet: true });
+    },
+    [playableBalance, refreshNativeBalance, solanaWallet],
+  );
 
   useEffect(() => {
     void refresh();
@@ -278,6 +324,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       },
       signOut,
       refresh,
+      refreshBalance,
+      refreshBalanceAfterMatch,
       updateDisplayName,
       evmWalletReady: Boolean(evmAccount.address),
       evmAddress: evmAccount.address ?? null,
@@ -303,6 +351,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       signInSolana,
       signOut,
       refresh,
+      refreshBalance,
+      refreshBalanceAfterMatch,
       updateDisplayName,
       setSolanaWalletModalVisible,
       evmAccount.address,

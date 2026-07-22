@@ -26,6 +26,7 @@ export type ServerMessage =
   | { type: "queue_update"; position: number; needed: number; arena: string; wager: number }
   | { type: "match_preparing"; arena: string; wager: number }
   | { type: "match_start"; matchId: string; playerId: number; tick: number; snapshot: GameSnapshot }
+  | { type: "match_resume"; matchId: string; playerId: number; tick: number; snapshot: GameSnapshot }
   | { type: "state"; tick: number; serverTime: number; snapshot: GameSnapshot }
   | { type: "eliminated"; playerId: number; payload: EliminationPayload }
   | { type: "match_end"; payload: MatchEndPayload }

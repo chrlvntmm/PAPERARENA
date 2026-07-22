@@ -47,6 +47,9 @@ const envSchema = z.object({
   ESCROW_TOKEN_DECIMALS: z.coerce.number().int().min(0).max(12).optional(),
   ESCROW_GAME_AUTHORITY_SECRET: z.string().min(1).optional(),
   ESCROW_GAME_AUTHORITY_KEYPAIR_PATH: z.string().min(1).optional(),
+  /** Optional: protect /ops/* recovery endpoints. Required in production. */
+  OPS_SECRET: z.string().min(16).optional(),
+  SHUTDOWN_DRAIN_MS: z.coerce.number().int().positive().optional(),
   LOGIC_TICK_MS: z.coerce.number().int().positive(),
   MOVEMENT_TICKS_PER_STEP: z.coerce.number().int().positive(),
   BROADCAST_HZ: z.coerce.number().int().positive(),
@@ -98,13 +101,18 @@ if (env.NODE_ENV === "production") {
   if (!env.ESCROW_GAME_AUTHORITY_SECRET && !env.ESCROW_GAME_AUTHORITY_KEYPAIR_PATH) {
     missingEscrow.push("ESCROW_GAME_AUTHORITY_SECRET or ESCROW_GAME_AUTHORITY_KEYPAIR_PATH");
   }
+  if (!env.OPS_SECRET) missingEscrow.push("OPS_SECRET");
   if (missingEscrow.length > 0) {
     throw new Error(
       `Production requires complete escrow configuration. Missing: ${missingEscrow.join(", ")}`,
     );
   }
-  if (env.ESCROW_TOKEN_DECIMALS === undefined) {
-    // default is fine but log-required: keep default 6
+  if (env.SOLANA_CLUSTER !== "mainnet-beta") {
+    console.warn(
+      "[config] Production NODE_ENV with SOLANA_CLUSTER=" +
+        env.SOLANA_CLUSTER +
+        " (expected mainnet-beta for real users).",
+    );
   }
 }
 
@@ -201,6 +209,8 @@ export const CONFIG = {
     GAME_AUTHORITY_KEYPAIR_PATH: env.ESCROW_GAME_AUTHORITY_KEYPAIR_PATH,
     BYPASS: env.ESCROW_BYPASS === "true",
   },
+  OPS_SECRET: env.OPS_SECRET,
+  SHUTDOWN_DRAIN_MS: env.SHUTDOWN_DRAIN_MS ?? 15_000,
   LOGIC_TICK_MS: env.LOGIC_TICK_MS,
   MOVEMENT_TICKS_PER_STEP: env.MOVEMENT_TICKS_PER_STEP,
   BROADCAST_HZ: env.BROADCAST_HZ,

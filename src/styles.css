@@ -40,11 +40,19 @@
 
 @layer base {
   * { border-color: var(--color-border); }
+  *, *::before, *::after { box-sizing: border-box; }
   html, body, #root { height: 100%; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     background-color: #0a0b0d;
     color: var(--color-foreground);
     font-family: "Rajdhani", "JetBrains Mono", system-ui, sans-serif;
+  }
+  button, input, textarea, select { font: inherit; }
+  button, [role="button"] { -webkit-tap-highlight-color: transparent; }
+  :focus-visible {
+    outline: 2px solid #f4ff3a;
+    outline-offset: 3px;
   }
 }
 

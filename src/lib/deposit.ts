@@ -98,6 +98,37 @@ export async function confirmDeposit(input: {
   return (await res.json()) as DepositIntent;
 }
 
+export async function listOpenDeposits(input: { walletId?: string } = {}) {
+  const params = new URLSearchParams();
+  if (input.walletId) params.set("walletId", input.walletId);
+  const q = params.toString();
+  const res = await api(`/wallet/open-deposits${q ? `?${q}` : ""}`, { method: "GET" });
+  if (!res.ok) {
+    const payload = await safeJson(res);
+    throw new Error(payload?.message ?? "Could not load open deposits.");
+  }
+  const body = (await res.json()) as { deposits: DepositIntent[] };
+  return body.deposits;
+}
+
+export async function refundDeposit(input: {
+  depositIntentId: string;
+  walletId?: string;
+}) {
+  const res = await api("/wallet/deposit-refund", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const payload = await safeJson(res);
+    throw new Error(payload?.message ?? "Could not refund deposit.");
+  }
+  return (await res.json()) as DepositIntent & {
+    refundTxSignature?: string;
+    alreadyRefunded?: boolean;
+  };
+}
+
 function api(path: string, init: RequestInit = {}) {
   return fetch(`${API_URL}${path}`, {
     ...init,

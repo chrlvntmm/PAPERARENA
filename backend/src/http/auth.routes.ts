@@ -17,6 +17,8 @@ import {
   confirmDeposit,
   createDepositIntent,
   getDepositIntentStatus,
+  listRefundableDeposits,
+  refundDepositIntent,
 } from "../auth/escrow.service.js";
 
 const challengeSchema = z.object({
@@ -43,6 +45,11 @@ const depositIntentSchema = z.object({
 const depositConfirmSchema = z.object({
   depositIntentId: z.string().uuid(),
   txSignature: z.string().min(1),
+  walletId: z.string().uuid().optional(),
+});
+
+const depositRefundSchema = z.object({
+  depositIntentId: z.string().uuid(),
   walletId: z.string().uuid().optional(),
 });
 
@@ -242,6 +249,56 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         wallet,
         depositIntentId: input.depositIntentId,
         txSignature: input.txSignature,
+      });
+    });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/wallet/open-deposits") {
+    const identity = await authenticateSessionToken(getSessionTokenFromCookie(req));
+    if (!identity) {
+      json(res, 401, { error: "UNAUTHENTICATED", message: "No active session." });
+      return true;
+    }
+    const solanaWallet = identity.wallets.find((wallet) => wallet.chainType === "solana");
+    const walletId =
+      url.searchParams.get("walletId") ?? solanaWallet?.id ?? identity.wallets[0]?.id;
+    const wallet = identity.wallets.find((candidate) => candidate.id === walletId);
+    if (!walletId || !wallet) {
+      json(res, 404, { error: "WALLET_NOT_FOUND", message: "No verified wallet found for this session." });
+      return true;
+    }
+    const deposits = await listRefundableDeposits({
+      userId: identity.user.id,
+      wallet,
+    });
+    json(res, 200, { deposits });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/wallet/deposit-refund") {
+    const identity = await authenticateSessionToken(getSessionTokenFromCookie(req));
+    if (!identity) {
+      json(res, 401, { error: "UNAUTHENTICATED", message: "No active session." });
+      return true;
+    }
+
+    await routeJson(req, res, async (body) => {
+      const input = depositRefundSchema.parse(body);
+      const wallet = input.walletId
+        ? identity.wallets.find((candidate) => candidate.id === input.walletId)
+        : identity.wallets.find((candidate) => candidate.chainType === "solana") ??
+          identity.wallets[0];
+      if (!wallet) {
+        throw new Error("No verified wallet found for this session.");
+      }
+      if (wallet.chainType !== "solana") {
+        throw new Error("Paid-match deposits require a Solana wallet.");
+      }
+      return refundDepositIntent({
+        userId: identity.user.id,
+        wallet,
+        depositIntentId: input.depositIntentId,
       });
     });
     return true;

@@ -1,5 +1,6 @@
 import { recoverStuckEscrowLocks } from "../auth/escrow.service.js";
 import { CONFIG } from "../config.js";
+import { log } from "../log.js";
 
 /**
  * Lightweight recovery loop for incomplete escrow lifecycle ops.
@@ -7,7 +8,6 @@ import { CONFIG } from "../config.js";
  */
 export function startEscrowRecoveryWorker(options: { intervalMs?: number } = {}) {
   if (CONFIG.ESCROW.BYPASS) {
-    console.info("[escrow-recovery] skipped (ESCROW_BYPASS=true)");
     return { stop() {} };
   }
 
@@ -18,11 +18,12 @@ export function startEscrowRecoveryWorker(options: { intervalMs?: number } = {})
     if (stopped) return;
     try {
       const result = await recoverStuckEscrowLocks({ olderThanMs: 90_000 });
-      if (result.released > 0 || result.reconciled > 0 || result.deferred > 0) {
-        console.info("[escrow-recovery] tick", result);
+      // Only log when something actually changed.
+      if (result.released > 0 || result.reconciled > 0) {
+        log.info("escrow-recovery", "reconciled stuck locks", result);
       }
     } catch (error) {
-      console.error("[escrow-recovery] tick failed", error);
+      log.error("escrow-recovery", "tick failed", error);
     }
   };
 

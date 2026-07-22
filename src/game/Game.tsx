@@ -264,7 +264,7 @@ export default function Game({
   return (
     <div className="min-h-screen w-full flex flex-col lg:flex-row" style={{ background: "#0a0b0d" }}>
       <div className="flex-1 flex items-center justify-center p-2 sm:p-4 relative min-w-0">
-        <canvas ref={canvasRef} className="block max-w-full neon-border rounded" />
+        <canvas ref={canvasRef} className="block max-h-[calc(100vh-1rem)] max-w-full rounded-md neon-border sm:max-h-[calc(100vh-2rem)]" />
 
         {isTerritory && !matchEnd && (
           <div className="absolute top-3 sm:top-6 left-1/2 -translate-x-1/2 px-3 sm:px-6 py-2 rounded-md border backdrop-blur-md flex items-center gap-2 sm:gap-3" style={{ background: "rgba(10,11,13,0.6)", borderColor: timeMs < 30000 ? "#ff3a6b" : "#f4ff3a", boxShadow: `0 0 24px ${timeMs < 30000 ? "rgba(255,58,107,0.5)" : "rgba(244,255,58,0.35)"}` }}>
@@ -299,7 +299,7 @@ export default function Game({
         {showLostModal && !matchEnd && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md z-30 p-3 sm:p-6">
             <div
-              className="rounded-[28px] sm:rounded-[36px] px-4 sm:px-8 py-8 sm:py-10 border max-w-[min(92vw,420px)] w-full overflow-hidden"
+              className="w-full max-w-[min(92vw,420px)] overflow-hidden rounded-lg border px-4 py-7 sm:px-8 sm:py-9"
               style={{
                 background: "#0a0b0d",
                 borderColor: "rgba(244,255,58,0.55)",
@@ -319,7 +319,7 @@ export default function Game({
               </div>
 
               <div
-                className="rounded-2xl px-5 py-5"
+                className="rounded-lg px-4 py-4 sm:px-5 sm:py-5"
                 style={{ background: "#06070a", border: "1px solid rgba(255,255,255,0.06)" }}
               >
                 <StatRow
@@ -349,7 +349,7 @@ export default function Game({
                 {showSpectate && (
                   <button
                     onClick={() => { playClickSound(); setShowLostModal(false); enterSpectateRef.current(); }}
-                    className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.16em] sm:tracking-[0.25em] text-[11px] border transition hover:scale-[1.03] flex items-center justify-center gap-2"
+                    className="flex flex-1 items-center justify-center gap-2 rounded-md border px-5 py-3 font-display text-[11px] tracking-[0.14em] transition hover:scale-[1.03] sm:tracking-[0.25em]"
                     style={{
                       background: "#0a0b0d",
                       borderColor: "rgba(255,255,255,0.18)",
@@ -361,7 +361,7 @@ export default function Game({
                 )}
                 <button
                   onClick={() => { playClickSound(); onExit({ won: false, payout: 0 }); }}
-                  className="flex-1 px-5 py-3 rounded-xl font-display tracking-[0.16em] sm:tracking-[0.25em] text-[11px] border transition hover:scale-[1.03]"
+                  className="flex-1 rounded-md border px-5 py-3 font-display text-[11px] tracking-[0.14em] transition hover:scale-[1.03] sm:tracking-[0.25em]"
                   style={{
                     background: "#0a0b0d",
                     borderColor: "rgba(255,255,255,0.18)",
@@ -378,7 +378,7 @@ export default function Game({
         {matchEnd?.houseClaim && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-md">
             <div
-              className="rounded-xl p-10 text-center border max-w-lg w-[92%]"
+              className="w-[92%] max-w-lg rounded-lg border p-5 text-center sm:p-8"
               style={{
                 background: "linear-gradient(180deg, #131418 0%, #0a0b0d 100%)",
                 borderColor: "rgba(255,58,107,0.55)",
@@ -392,7 +392,7 @@ export default function Game({
               <div className="font-display text-lg tracking-[0.25em] text-white/80 mb-6">HOUSE CLAIMS THE POT</div>
               <div className="font-display text-5xl mb-2 text-white/30 line-through tabular-nums">${state?.totalMapValue.toFixed(2) ?? "0.00"}</div>
               <div className="text-[11px] tracking-[0.35em] text-white/50 mb-6">FORFEITED TO PLATFORM</div>
-              <button onClick={() => { playClickSound(); onExit({ won: false, payout: 0 }); }} className="mt-2 px-8 py-3 neon-border rounded font-display tracking-widest text-sm hover:bg-white/5">
+              <button onClick={() => { playClickSound(); onExit({ won: false, payout: 0 }); }} className="mt-2 rounded-md px-8 py-3 font-display text-sm tracking-widest neon-border hover:bg-white/5">
                 RETURN TO LOBBY
               </button>
             </div>
@@ -406,7 +406,7 @@ export default function Game({
           return (
             <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md p-3 sm:p-6">
               <div
-                className="rounded-[28px] sm:rounded-[36px] px-4 sm:px-8 py-8 sm:py-10 border max-w-[min(92vw,460px)] w-full overflow-hidden"
+                className="w-full max-w-[min(92vw,460px)] overflow-hidden rounded-lg border px-4 py-7 sm:px-8 sm:py-9"
                 style={{
                   background: "#0a0b0d",
                   borderColor: "rgba(244,255,58,0.55)",
@@ -446,7 +446,7 @@ export default function Game({
                 </div>
 
                 <div
-                  className="rounded-2xl px-5 py-5"
+                  className="rounded-lg px-4 py-4 sm:px-5 sm:py-5"
                   style={{ background: "#06070a", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
                   <StatRow

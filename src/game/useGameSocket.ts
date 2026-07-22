@@ -30,6 +30,12 @@ export function useGameSocket() {
   const lastAuthErrorRef = useRef<string | null>(null);
   const authPromiseRef = useRef<JoinWaiter | null>(null);
   const joinAckRef = useRef<JoinWaiter | null>(null);
+  /** True while we expect the server to still have our match (for auto-reconnect). */
+  const inMatchRef = useRef(false);
+  const intentionalCloseRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const connectRef = useRef<() => void>(() => {});
 
   const [connected, setConnected] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
@@ -43,6 +49,7 @@ export function useGameSocket() {
   const [elimination, setElimination] = useState<EliminationPayload | null>(null);
   const [matchEnd, setMatchEnd] = useState<MatchEndPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
 
   const clearJoinAck = useCallback((err?: Error) => {
     if (!joinAckRef.current) return;
@@ -116,14 +123,21 @@ export function useGameSocket() {
           clearJoinAck();
           break;
         case "match_start":
+        case "match_resume":
+          inMatchRef.current = true;
+          reconnectAttemptsRef.current = 0;
+          setReconnecting(false);
           setMatchId(msg.matchId);
           setPlayerId(msg.playerId);
           setSnapshot(msg.snapshot);
           setQueuePosition(null);
           setQueueNeeded(null);
           setMatchPreparing(false);
-          setElimination(null);
-          setMatchEnd(null);
+          if (msg.type === "match_start") {
+            setElimination(null);
+            setMatchEnd(null);
+          }
+          setError(null);
           clearJoinAck();
           break;
         case "state":
@@ -133,6 +147,7 @@ export function useGameSocket() {
           setElimination(msg.payload);
           break;
         case "match_end":
+          inMatchRef.current = false;
           setMatchEnd(msg.payload);
           break;
         case "error":
@@ -165,6 +180,7 @@ export function useGameSocket() {
   const connect = useCallback(() => {
     setError(null);
     lastAuthErrorRef.current = null;
+    intentionalCloseRef.current = false;
 
     const existing = wsRef.current;
     if (existing?.readyState === WebSocket.OPEN && authenticatedRef.current) {
@@ -209,14 +225,37 @@ export function useGameSocket() {
         authPromiseRef.current.reject(new Error("Arena connection closed before authentication."));
         authPromiseRef.current = null;
       }
-      clearJoinAck(new Error("Arena connection closed."));
+      if (!inMatchRef.current) {
+        clearJoinAck(new Error("Arena connection closed."));
+      }
+
+      // Auto-reconnect while still in a live match (server holds grace window).
+      if (!intentionalCloseRef.current && inMatchRef.current) {
+        const attempt = reconnectAttemptsRef.current;
+        if (attempt < 8) {
+          reconnectAttemptsRef.current = attempt + 1;
+          setReconnecting(true);
+          const delay = Math.min(1000 * 2 ** attempt, 8000);
+          if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = window.setTimeout(() => {
+            connectRef.current();
+          }, delay);
+        } else {
+          setReconnecting(false);
+          setError("Connection lost. Could not rejoin the match.");
+        }
+      }
     };
 
     ws.onerror = () => {
       lastAuthErrorRef.current = "WebSocket connection failed";
-      setError("WebSocket connection failed");
+      if (!inMatchRef.current) {
+        setError("WebSocket connection failed");
+      }
     };
   }, [clearJoinAck, handleMessage]);
+
+  connectRef.current = connect;
 
   const waitForAuth = useCallback(() => {
     if (authenticatedRef.current) return Promise.resolve();
@@ -265,7 +304,7 @@ export function useGameSocket() {
           if (joinAckRef.current !== waiter) return;
           joinAckRef.current = null;
           reject(new Error("Join timed out waiting for arena server. Please try again."));
-        }, 20_000);
+        }, 45_000);
         joinAckRef.current = waiter;
 
         if (authenticatedRef.current) {
@@ -305,6 +344,9 @@ export function useGameSocket() {
 
   const reset = useCallback(() => {
     leaveQueue();
+    inMatchRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    setReconnecting(false);
     setMatchId(null);
     setPlayerId(null);
     setSnapshot(null);
@@ -315,6 +357,12 @@ export function useGameSocket() {
   }, [leaveQueue]);
 
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true;
+    inMatchRef.current = false;
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     leaveQueue();
     wsRef.current?.close();
     wsRef.current = null;
@@ -323,13 +371,17 @@ export function useGameSocket() {
     setConnected(false);
     setAuthenticated(false);
     setSessionId(null);
+    setReconnecting(false);
   }, [leaveQueue]);
 
   useEffect(() => {
     return () => {
+      intentionalCloseRef.current = true;
+      inMatchRef.current = false;
       pendingJoinRef.current = null;
       authenticatedRef.current = false;
       lastAuthErrorRef.current = null;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       if (authPromiseRef.current) {
         window.clearTimeout(authPromiseRef.current.timeoutId);
       }
@@ -357,6 +409,7 @@ export function useGameSocket() {
     elimination,
     matchEnd,
     error,
+    reconnecting,
     connect,
     waitForAuth,
     joinQueue,

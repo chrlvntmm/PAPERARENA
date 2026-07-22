@@ -2,9 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import { CONFIG, type ArenaType, type WagerAmount } from "../config.js";
 import { db, type DepositIntentDocument, type WalletDocument } from "../db/postgres.js";
+import { log } from "../log.js";
 import {
   DEPOSIT_STATUS,
   fetchDepositEscrow,
+  fetchDepositEscrowReady,
   fetchMatchEscrow,
   fetchSettlementRecordExists,
   forfeitMatchOnChain,
@@ -17,6 +19,7 @@ import {
   publicDepositBuildParams,
   randomIntentId,
   randomMatchId,
+  refundDepositOnChain,
   settleMatchOnChain,
   wagerAmountBaseUnits,
 } from "../escrow/program.js";
@@ -82,7 +85,8 @@ export async function createDepositIntent(args: {
   if (
     existing &&
     existing.expiresAt > now &&
-    !["consumed", "refunded", "forfeited", "failed"].includes(existing.status)
+    !["consumed", "refunded", "forfeited", "failed"].includes(existing.status) &&
+    existing.verificationError !== "refunding"
   ) {
     // Re-check chain for awaiting/submitted intents so UI can refresh cleanly.
     if (
@@ -185,6 +189,367 @@ export async function getDepositIntentStatus(args: {
   return publicDepositIntent(intent, args.walletAddress ?? intent.walletAddress);
 }
 
+/**
+ * Refund a unused Funded deposit to the player's token account.
+ *
+ * Hard rules (fail closed):
+ * - Never refund if DB status is consumed / refunded / forfeited
+ * - Never refund if linked to active or finished match locks (created…forfeited)
+ * - Never refund if on-chain status is Consumed (in a match pot)
+ * - If on-chain already Refunded → sync DB only (idempotent, no second transfer)
+ * - Concurrent refunds: claim row; loser reconciles chain after winner finishes
+ */
+export async function refundDepositIntent(args: {
+  userId: string;
+  wallet: WalletDocument;
+  depositIntentId: string;
+}): Promise<PublicDepositIntent & { refundTxSignature?: string; alreadyRefunded?: boolean }> {
+  if (CONFIG.ESCROW.BYPASS) {
+    const intent = await db.findDepositIntentById(args.depositIntentId);
+    if (!intent || intent.userId !== args.userId || intent.walletId !== args.wallet.id) {
+      throw new Error("Deposit intent not found.");
+    }
+    if (intent.status === "refunded") {
+      return { ...publicDepositIntent(intent, args.wallet.address), alreadyRefunded: true };
+    }
+    if (intent.status === "consumed") {
+      throw new Error("This deposit was used in a match and cannot be refunded.");
+    }
+    await db.markDepositIntentRefunded({
+      id: intent.id,
+      updatedAt: new Date(),
+      note: "dev-bypass-refund",
+    });
+    const updated = await db.findDepositIntentById(intent.id);
+    return {
+      ...publicDepositIntent(updated!, args.wallet.address),
+      refundTxSignature: "dev-bypass-refund",
+    };
+  }
+
+  if (!isEscrowProgramConfigured()) {
+    throw new Error("Solana escrow contract is not configured yet.");
+  }
+
+  const existing = await db.findDepositIntentById(args.depositIntentId);
+  if (!existing || existing.userId !== args.userId || existing.walletId !== args.wallet.id) {
+    throw new Error("Deposit intent not found.");
+  }
+  if (existing.walletAddress !== args.wallet.address) {
+    throw new Error("Deposit wallet does not match session wallet.");
+  }
+
+  // Already done — idempotent success.
+  if (existing.status === "refunded") {
+    return {
+      ...publicDepositIntent(existing, args.wallet.address),
+      alreadyRefunded: true,
+    };
+  }
+
+  if (existing.status === "consumed" || existing.consumedAt) {
+    throw new Error("This deposit was used in a match and cannot be refunded.");
+  }
+  if (existing.status === "forfeited") {
+    throw new Error("This deposit was forfeited and cannot be refunded.");
+  }
+
+  // Block any match lifecycle that still holds or already settled this deposit.
+  const blocking = await db.findBlockingMatchLocksForDeposit(existing.id);
+  if (blocking.length > 0) {
+    const b = blocking[0]!;
+    throw new Error(
+      `Deposit is tied to match ${b.matchId} (${b.status}) and cannot be refunded.`,
+    );
+  }
+
+  // Claim for exclusive refund attempt (stale claim after 2 min can retry).
+  const now = new Date();
+  const claimed = await db.claimDepositIntentForRefund({
+    id: existing.id,
+    userId: args.userId,
+    walletId: args.wallet.id,
+    claimedAt: now,
+    staleBefore: new Date(now.getTime() - 120_000),
+  });
+  if (!claimed) {
+    // Another worker may be refunding — re-read and reconcile.
+    const again = await db.findDepositIntentById(existing.id);
+    if (again?.status === "refunded") {
+      return {
+        ...publicDepositIntent(again, args.wallet.address),
+        alreadyRefunded: true,
+      };
+    }
+    // Brief wait then check chain
+    await new Promise((r) => setTimeout(r, 800));
+    const synced = await syncRefundFromChain(existing, args.wallet.address);
+    if (synced) return synced;
+    throw new Error("Refund already in progress. Try again in a moment.");
+  }
+
+  try {
+    // Chain is source of truth.
+    const onChain =
+      (await fetchDepositEscrow(claimed.idempotencyKey, "confirmed")) ??
+      (await fetchDepositEscrow(claimed.idempotencyKey, "processed"));
+
+    if (!onChain) {
+      // Never deposited on-chain — nothing to return. Mark refunded so it cannot be joined.
+      await db.markDepositIntentRefunded({
+        id: claimed.id,
+        updatedAt: new Date(),
+        note: "no_onchain_deposit",
+      });
+      const updated = await db.findDepositIntentById(claimed.id);
+      return {
+        ...publicDepositIntent(updated!, args.wallet.address),
+        alreadyRefunded: true,
+      };
+    }
+
+    if (!onChain.escrow.player.equals(new PublicKey(args.wallet.address))) {
+      throw new Error("On-chain deposit player does not match wallet.");
+    }
+
+    if (onChain.escrow.status === DEPOSIT_STATUS.Refunded) {
+      await db.markDepositIntentRefunded({
+        id: claimed.id,
+        updatedAt: new Date(),
+        note: "already_refunded_onchain",
+      });
+      const updated = await db.findDepositIntentById(claimed.id);
+      return {
+        ...publicDepositIntent(updated!, args.wallet.address),
+        alreadyRefunded: true,
+      };
+    }
+
+    if (onChain.escrow.status === DEPOSIT_STATUS.Consumed) {
+      // In a match pot — never refund deposit-level.
+      await db.clearDepositRefundClaim({ id: claimed.id, updatedAt: new Date() });
+      throw new Error(
+        "This deposit is locked into a match on-chain and cannot be refunded.",
+      );
+    }
+
+    if (onChain.escrow.status !== DEPOSIT_STATUS.Funded) {
+      await db.clearDepositRefundClaim({ id: claimed.id, updatedAt: new Date() });
+      throw new Error("Deposit is not in a refundable on-chain state.");
+    }
+
+    let refundTxSignature: string | undefined;
+    try {
+      refundTxSignature = await refundDepositOnChain({
+        intentIdHex: claimed.idempotencyKey,
+        player: new PublicKey(args.wallet.address),
+      });
+    } catch (error) {
+      // Race: another refund may have landed — reconcile.
+      const after =
+        (await fetchDepositEscrow(claimed.idempotencyKey, "confirmed")) ??
+        (await fetchDepositEscrow(claimed.idempotencyKey, "processed"));
+      if (after?.escrow.status === DEPOSIT_STATUS.Refunded) {
+        await db.markDepositIntentRefunded({
+          id: claimed.id,
+          updatedAt: new Date(),
+          note: "reconciled_after_race",
+        });
+        const updated = await db.findDepositIntentById(claimed.id);
+        return {
+          ...publicDepositIntent(updated!, args.wallet.address),
+          alreadyRefunded: true,
+        };
+      }
+      if (after?.escrow.status === DEPOSIT_STATUS.Consumed) {
+        await db.clearDepositRefundClaim({ id: claimed.id, updatedAt: new Date() });
+        throw new Error(
+          "Deposit was locked into a match and cannot be refunded.",
+        );
+      }
+      throw error instanceof Error ? error : new Error("Refund transaction failed.");
+    }
+
+    // Confirm final chain state before marking DB.
+    const finalState =
+      (await fetchDepositEscrow(claimed.idempotencyKey, "confirmed")) ??
+      (await fetchDepositEscrow(claimed.idempotencyKey, "processed"));
+    if (!finalState || finalState.escrow.status !== DEPOSIT_STATUS.Refunded) {
+      // Tx reported ok but account not Refunded yet — short poll.
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        const polled = await fetchDepositEscrow(claimed.idempotencyKey, "confirmed");
+        if (polled?.escrow.status === DEPOSIT_STATUS.Refunded) break;
+        if (i === 7) {
+          log.error("escrow", "refund tx sent but account not Refunded yet", {
+            intentId: claimed.id,
+            refundTxSignature,
+          });
+          throw new Error(
+            "Refund submitted but not confirmed on-chain yet. Do not retry immediately — check balance and try again shortly.",
+          );
+        }
+      }
+    }
+
+    await db.markDepositIntentRefunded({
+      id: claimed.id,
+      updatedAt: new Date(),
+      note: refundTxSignature ? `refund:${refundTxSignature}` : null,
+    });
+
+    log.info("escrow", "deposit refunded", {
+      intentId: claimed.id,
+      wallet: args.wallet.address,
+      refundTxSignature,
+    });
+
+    const updated = await db.findDepositIntentById(claimed.id);
+    return {
+      ...publicDepositIntent(updated!, args.wallet.address),
+      refundTxSignature,
+    };
+  } catch (error) {
+    await db.clearDepositRefundClaim({ id: claimed.id, updatedAt: new Date() });
+    throw error;
+  }
+}
+
+async function syncRefundFromChain(
+  intent: DepositIntentDocument,
+  playerAddress: string,
+): Promise<(PublicDepositIntent & { alreadyRefunded?: boolean; refundTxSignature?: string }) | null> {
+  if (!isEscrowProgramConfigured()) return null;
+  const onChain =
+    (await fetchDepositEscrow(intent.idempotencyKey, "confirmed")) ??
+    (await fetchDepositEscrow(intent.idempotencyKey, "processed"));
+  if (onChain?.escrow.status === DEPOSIT_STATUS.Refunded) {
+    await db.markDepositIntentRefunded({
+      id: intent.id,
+      updatedAt: new Date(),
+      note: "synced_from_chain",
+    });
+    const updated = await db.findDepositIntentById(intent.id);
+    return {
+      ...publicDepositIntent(updated!, playerAddress),
+      alreadyRefunded: true,
+    };
+  }
+  if (intent.status === "refunded") {
+    return {
+      ...publicDepositIntent(intent, playerAddress),
+      alreadyRefunded: true,
+    };
+  }
+  return null;
+}
+
+export async function listRefundableDeposits(args: {
+  userId: string;
+  wallet: WalletDocument;
+}): Promise<PublicDepositIntent[]> {
+  const rows = await db.findRefundableDepositIntents({
+    userId: args.userId,
+    walletId: args.wallet.id,
+    limit: 20,
+  });
+  const out: PublicDepositIntent[] = [];
+  for (const row of rows) {
+    // Drop ones blocked by active/finished match locks.
+    const blocking = await db.findBlockingMatchLocksForDeposit(row.id);
+    if (blocking.length > 0) continue;
+    out.push(publicDepositIntent(row, args.wallet.address));
+  }
+  return out;
+}
+
+/**
+ * Authority auto-refund for expired unused Funded deposits (recovery tick).
+ * Never touches consumed / match-linked deposits.
+ */
+export async function autoRefundExpiredDeposits(options: { limit?: number } = {}) {
+  if (CONFIG.ESCROW.BYPASS || !isEscrowProgramConfigured()) {
+    return { scanned: 0, refunded: 0, skipped: 0, failed: 0 };
+  }
+  const program = getEscrowProgram();
+  if (!program.gameAuthority) {
+    return { scanned: 0, refunded: 0, skipped: 0, failed: 0 };
+  }
+
+  const rows = await db.findExpiredUnusedDepositsForRefund({
+    olderThan: new Date(),
+    limit: options.limit ?? 15,
+  });
+  let refunded = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const intent of rows) {
+    try {
+      const blocking = await db.findBlockingMatchLocksForDeposit(intent.id);
+      if (blocking.length > 0) {
+        skipped += 1;
+        continue;
+      }
+      const onChain =
+        (await fetchDepositEscrow(intent.idempotencyKey, "confirmed")) ??
+        (await fetchDepositEscrow(intent.idempotencyKey, "processed"));
+      if (!onChain) {
+        await db.markDepositIntentRefunded({
+          id: intent.id,
+          updatedAt: new Date(),
+          note: "expired_no_onchain",
+        });
+        skipped += 1;
+        continue;
+      }
+      if (onChain.escrow.status === DEPOSIT_STATUS.Refunded) {
+        await db.markDepositIntentRefunded({
+          id: intent.id,
+          updatedAt: new Date(),
+          note: "expired_already_refunded",
+        });
+        refunded += 1;
+        continue;
+      }
+      if (onChain.escrow.status !== DEPOSIT_STATUS.Funded) {
+        skipped += 1;
+        continue;
+      }
+      // Only auto-refund after on-chain expires_at as well.
+      if (Number(onChain.escrow.expiresAt) * 1000 > Date.now()) {
+        skipped += 1;
+        continue;
+      }
+
+      await refundDepositIntent({
+        userId: intent.userId,
+        wallet: {
+          id: intent.walletId,
+          userId: intent.userId,
+          chainType: intent.chainType,
+          chainId: intent.chainId,
+          address: intent.walletAddress,
+          addressNormalized: intent.walletAddress,
+          firstVerifiedAt: intent.createdAt,
+          lastVerifiedAt: intent.updatedAt,
+          createdAt: intent.createdAt,
+        },
+        depositIntentId: intent.id,
+      });
+      refunded += 1;
+    } catch (error) {
+      failed += 1;
+      log.warn("escrow", "auto-refund expired deposit failed", {
+        intentId: intent.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { scanned: rows.length, refunded, skipped, failed };
+}
+
 export async function confirmDeposit(args: {
   userId: string;
   wallet: WalletDocument;
@@ -229,6 +594,7 @@ export async function confirmDeposit(args: {
     intent: { ...intent, txSignature: args.txSignature, status: "submitted" },
     wallet: args.wallet,
     txSignature: args.txSignature,
+    waitForAccount: true,
   });
   if (!refreshed || refreshed.status !== "verified") {
     throw new Error(refreshed?.verificationError ?? "Deposit could not be verified on-chain.");
@@ -283,6 +649,10 @@ export async function verifyEscrowBuyIn(
     return { ok: false, reason: "Deposit intent expired." };
   }
 
+  if (intent.verificationError === "refunding") {
+    return { ok: false, reason: "Deposit refund is in progress. Wait or cancel refund." };
+  }
+
   if (intent.status !== "verified") {
     // Last-chance on-chain recheck
     if (isEscrowProgramConfigured()) {
@@ -304,6 +674,9 @@ export async function verifyEscrowBuyIn(
       if (!refreshed || refreshed.status !== "verified") {
         return { ok: false, reason: refreshed?.verificationError ?? "Deposit is not verified." };
       }
+      if (refreshed.verificationError === "refunding") {
+        return { ok: false, reason: "Deposit refund is in progress." };
+      }
     } else {
       return { ok: false, reason: "Deposit is not verified." };
     }
@@ -311,7 +684,9 @@ export async function verifyEscrowBuyIn(
 
   // Re-read chain to ensure still Funded (not consumed elsewhere)
   if (isEscrowProgramConfigured()) {
-    const onChain = await fetchDepositEscrow(intent.idempotencyKey);
+    const onChain =
+      (await fetchDepositEscrow(intent.idempotencyKey, "processed")) ??
+      (await fetchDepositEscrow(intent.idempotencyKey, "confirmed"));
     if (!onChain || onChain.escrow.status !== DEPOSIT_STATUS.Funded) {
       return { ok: false, reason: "On-chain deposit is not funded or already used." };
     }
@@ -425,7 +800,7 @@ export async function lockMatchFunds(args: {
       status: "failed",
       updatedAt: new Date(),
     });
-    console.error("[escrow] lock aborted: deposit consume failed", {
+    log.error("escrow", "lock aborted: deposit consume failed", {
       matchId: args.matchId,
       intentIds: intents.map((i) => i.id),
     });
@@ -454,7 +829,7 @@ export async function lockMatchFunds(args: {
       updatedAt: new Date(),
     });
 
-    console.info("[escrow] match locked", {
+    log.info("escrow", "match locked", {
       matchId: args.matchId,
       onChainMatchIdHex,
       txSignature,
@@ -476,7 +851,7 @@ export async function lockMatchFunds(args: {
         status: "locked",
         updatedAt: new Date(),
       });
-      console.warn("[escrow] lock confirm failed but on-chain match exists — marking locked", {
+      log.warn("escrow", "lock confirm failed but on-chain match exists — marking locked", {
         matchId: args.matchId,
         onChainMatchIdHex,
         chainStatus: probe.escrow.status,
@@ -487,7 +862,7 @@ export async function lockMatchFunds(args: {
 
     if (probe.kind === "unknown") {
       // Leave status=created, deposits consumed. Recovery will re-probe.
-      console.error("[escrow] lock outcome UNKNOWN — holding deposits pending chain read", {
+      log.error("escrow", "lock outcome UNKNOWN — holding deposits pending chain read", {
         matchId: args.matchId,
         onChainMatchIdHex,
         reason: message,
@@ -502,7 +877,7 @@ export async function lockMatchFunds(args: {
       };
     }
 
-    // Proven absent — safe to release.
+    // Proven absent — safe to release DB holds, then auto-refund vault → wallets.
     for (const id of consume.consumed) {
       await db.releaseConsumedDepositIntent({ id, updatedAt: new Date() });
     }
@@ -511,12 +886,45 @@ export async function lockMatchFunds(args: {
       status: "failed",
       updatedAt: new Date(),
     });
-    console.error("[escrow] lock chain failed; deposits released (no on-chain match)", {
+    log.error("escrow", "lock chain failed; deposits released (no on-chain match)", {
       matchId: args.matchId,
       onChainMatchIdHex,
       reason: message,
     });
+    // Return funds automatically — never leave Funded deposits stranded after a failed lock.
+    await autoRefundReleasedDepositIds(consume.consumed);
     return { ok: false, reason: message };
+  }
+}
+
+/** Best-effort refund after a lock is proven absent. Guards inside refundDepositIntent still apply. */
+async function autoRefundReleasedDepositIds(ids: string[]) {
+  for (const id of ids) {
+    try {
+      const intent = await db.findDepositIntentById(id);
+      if (!intent || intent.status === "refunded" || intent.status === "consumed") continue;
+      await refundDepositIntent({
+        userId: intent.userId,
+        wallet: {
+          id: intent.walletId,
+          userId: intent.userId,
+          chainType: intent.chainType,
+          chainId: intent.chainId,
+          address: intent.walletAddress,
+          addressNormalized: intent.walletAddress,
+          firstVerifiedAt: intent.createdAt,
+          lastVerifiedAt: intent.updatedAt,
+          createdAt: intent.createdAt,
+        },
+        depositIntentId: intent.id,
+      });
+      log.info("escrow", "auto-refund after failed lock", { intentId: id });
+    } catch (error) {
+      log.warn("escrow", "auto-refund after failed lock failed", {
+        intentId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 
@@ -761,7 +1169,7 @@ export async function settleMatchFunds(args: {
       status: "settled",
       updatedAt: new Date(),
     });
-    console.info("[escrow] match settled", {
+    log.info("escrow", "match settled", {
       matchId: args.matchId,
       onChainMatchIdHex: matchIdHex,
       txSignature,
@@ -788,7 +1196,7 @@ export async function settleMatchFunds(args: {
         status: "settled",
         updatedAt: new Date(),
       });
-      console.warn("[escrow] settle confirm failed but on-chain settlement exists", {
+      log.warn("escrow", "settle confirm failed but on-chain settlement exists", {
         matchId: args.matchId,
         attemptId: attempt.id,
         reason: message,
@@ -809,7 +1217,7 @@ export async function settleMatchFunds(args: {
         status: "settling",
         updatedAt: new Date(),
       });
-      console.error("[escrow] settlement outcome UNKNOWN — leaving settling", {
+      log.error("escrow", "settlement outcome UNKNOWN — leaving settling", {
         matchId: args.matchId,
         attemptId: attempt.id,
         reason: message,
@@ -833,7 +1241,7 @@ export async function settleMatchFunds(args: {
       status: "locked",
       updatedAt: new Date(),
     });
-    console.error("[escrow] settlement failed", {
+    log.error("escrow", "settlement failed", {
       matchId: args.matchId,
       attemptId: attempt.id,
       reason: message,
@@ -936,7 +1344,7 @@ export async function forfeitMatchFunds(args: {
       lockTxSignature: txSignature,
       updatedAt: new Date(),
     });
-    console.info("[escrow] match forfeited to treasury", {
+    log.info("escrow", "match forfeited to treasury", {
       matchId: args.matchId,
       onChainMatchIdHex: matchIdHex,
       txSignature,
@@ -957,7 +1365,7 @@ export async function forfeitMatchFunds(args: {
         status: "forfeited",
         updatedAt: new Date(),
       });
-      console.warn("[escrow] forfeit confirm failed but on-chain forfeited", {
+      log.warn("escrow", "forfeit confirm failed but on-chain forfeited", {
         matchId: args.matchId,
         reason: message,
       });
@@ -976,7 +1384,7 @@ export async function forfeitMatchFunds(args: {
         status: "forfeiting",
         updatedAt: new Date(),
       });
-      console.error("[escrow] forfeit outcome UNKNOWN — leaving forfeiting", {
+      log.error("escrow", "forfeit outcome UNKNOWN — leaving forfeiting", {
         matchId: args.matchId,
         reason: message,
         probeError: chainAfter.error,
@@ -999,7 +1407,7 @@ export async function forfeitMatchFunds(args: {
       status: "locked",
       updatedAt: new Date(),
     });
-    console.error("[escrow] forfeit failed", { matchId: args.matchId, reason: message });
+    log.error("escrow", "forfeit failed", { matchId: args.matchId, reason: message });
     return { ok: false, reason: message };
   }
 }
@@ -1020,6 +1428,8 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
   let released = 0;
   let reconciled = 0;
   let deferred = 0;
+  // Also return expired unused deposits (Funded on-chain only; never match pots).
+  const expiredRefunds = await autoRefundExpiredDeposits({ limit: 10 });
 
   for (const lock of stuck) {
     if (!lock.onChainMatchIdHex) {
@@ -1042,7 +1452,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
           updatedAt: new Date(),
         });
         reconciled += 1;
-        console.warn("[escrow] recovery: lock reconciled from chain", {
+        log.warn("escrow", "recovery: lock reconciled from chain", {
           matchId: lock.matchId,
           status,
         });
@@ -1050,7 +1460,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
       }
       if (probe.kind === "unknown") {
         deferred += 1;
-        console.warn("[escrow] recovery: lock probe unknown — holding", {
+        log.warn("escrow", "recovery: lock probe unknown — holding", {
           matchId: lock.matchId,
           error: probe.error,
         });
@@ -1065,9 +1475,13 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
         continue;
       }
       const intents = await db.findDepositIntentsByMatchLock(lock.matchId);
+      const releasedIds: string[] = [];
       for (const intent of intents) {
         if (intent.status === "consumed") {
           await db.releaseConsumedDepositIntent({ id: intent.id, updatedAt: new Date() });
+          releasedIds.push(intent.id);
+        } else if (intent.status === "verified") {
+          releasedIds.push(intent.id);
         }
       }
       await db.updateMatchFundLockStatus({
@@ -1076,10 +1490,11 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
         updatedAt: new Date(),
       });
       released += 1;
-      console.warn("[escrow] recovery: released lock after proven-absent match", {
+      log.warn("escrow", "recovery: released lock after proven-absent match", {
         matchId: lock.matchId,
         onChainMatchIdHex: lock.onChainMatchIdHex,
       });
+      await autoRefundReleasedDepositIds(releasedIds);
       continue;
     }
 
@@ -1106,7 +1521,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
           }
         }
         reconciled += 1;
-        console.warn("[escrow] recovery: settlement reconciled from chain", {
+        log.warn("escrow", "recovery: settlement reconciled from chain", {
           matchId: lock.matchId,
         });
         continue;
@@ -1123,7 +1538,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
           updatedAt: new Date(),
         });
         reconciled += 1;
-        console.warn("[escrow] recovery: settling → locked (not settled on-chain)", {
+        log.warn("escrow", "recovery: settling → locked (not settled on-chain)", {
           matchId: lock.matchId,
         });
         continue;
@@ -1151,7 +1566,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
           }
         }
         reconciled += 1;
-        console.warn("[escrow] recovery: forfeit reconciled from chain", {
+        log.warn("escrow", "recovery: forfeit reconciled from chain", {
           matchId: lock.matchId,
         });
         continue;
@@ -1167,7 +1582,7 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
           updatedAt: new Date(),
         });
         reconciled += 1;
-        console.warn("[escrow] recovery: forfeiting → locked (forfeit not on-chain)", {
+        log.warn("escrow", "recovery: forfeiting → locked (forfeit not on-chain)", {
           matchId: lock.matchId,
         });
         continue;
@@ -1176,17 +1591,31 @@ export async function recoverStuckEscrowLocks(options: { olderThanMs?: number } 
     }
   }
 
-  return { scanned: stuck.length, released, reconciled, deferred };
+  return {
+    scanned: stuck.length,
+    released,
+    reconciled,
+    deferred,
+    expiredRefunds,
+  };
 }
 
 async function verifyDepositOnChain(args: {
   intent: DepositIntentDocument;
   wallet: WalletDocument;
   txSignature?: string;
+  /** When true (post-submit), poll briefly for PDA visibility after processed confirm. */
+  waitForAccount?: boolean;
 }): Promise<DepositIntentDocument | null> {
   try {
     const program = getEscrowProgram();
-    const onChain = await fetchDepositEscrow(args.intent.idempotencyKey);
+    const onChain = args.waitForAccount
+      ? await fetchDepositEscrowReady(args.intent.idempotencyKey, {
+          attempts: 12,
+          delayMs: 300,
+        })
+      : (await fetchDepositEscrow(args.intent.idempotencyKey, "processed")) ??
+        (await fetchDepositEscrow(args.intent.idempotencyKey, "confirmed"));
     if (!onChain) {
       await db.updateDepositIntent({
         id: args.intent.id,

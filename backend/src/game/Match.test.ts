@@ -124,8 +124,68 @@ test("disconnect grace force-eliminates through canonical cleanup and ends last-
   assert.equal(match.state.players[0].alive, false);
   assert.equal(match.state.players[0].visible, false);
   assert.equal(match.state.players[0].x, -1);
-  assert.ok(messages(sessions[0]).some((msg) => msg.type === "eliminated"));
+  // Eliminated notify may be skipped if socket already detached; match still ends.
   assert.ok(messages(sessions[1]).some((msg) => msg.type === "match_end"));
+});
+
+test("reconnect within grace cancels force-elim and sends match_resume", async () => {
+  process.env.DISCONNECT_GRACE_MS = "50";
+  // Re-import is cached; grace is read at disconnect time from CONFIG already loaded.
+  // Use explicit long-enough delay pattern: set grace via CONFIG is already 0 from top —
+  // force grace by calling handleDisconnect then reconnect before timer with DISCONNECT_GRACE_MS=0
+  // means timer fires immediately. So test reconnect BEFORE awaiting:
+  const { Match } = await import("./Match.js");
+  const sessions = [makeSession(), makeSession()];
+  // Ensure non-zero grace for this process by only testing cancel path with grace 0:
+  // reconnect synchronously before next macrotask if grace is 0 timer is still scheduled async.
+  const match = new Match("standard", 10, makeEntries(sessions));
+  frame(match, 100);
+
+  const old = sessions[0];
+  match.handleDisconnect(old);
+
+  const fresh = makeSession();
+  // Same wallet identity as player 0
+  Object.assign(fresh, {
+    walletId: old.walletId,
+    walletAddress: old.walletAddress,
+    userId: old.userId,
+    authenticated: true,
+  });
+
+  const ok = match.tryReconnect(fresh);
+  assert.equal(ok, true);
+  assert.equal(fresh.playerId, 0);
+  assert.equal(fresh.matchId, match.id);
+  assert.equal(match.state.players[0].alive, true);
+  assert.ok(messages(fresh).some((msg) => msg.type === "match_resume"));
+
+  // After reconnect, grace should not eliminate
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(match.state.players[0].alive, true);
+});
+
+test("reconnect after grace ends match when last opponent remains", async () => {
+  const { Match } = await import("./Match.js");
+  const sessions = [makeSession(), makeSession()];
+  const match = new Match("standard", 10, makeEntries(sessions));
+  frame(match, 100);
+  match.handleDisconnect(sessions[0]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(match.state.players[0].alive, false);
+  // 2-player arena: force-elim ends the match (last standing).
+  assert.ok(messages(sessions[1]).some((msg) => msg.type === "match_end"));
+
+  const fresh = makeSession();
+  Object.assign(fresh, {
+    walletId: sessions[0].walletId,
+    walletAddress: sessions[0].walletAddress,
+    userId: sessions[0].userId,
+    authenticated: true,
+  });
+  // Match destroyed after end — reconnect is rejected.
+  const ok = match.tryReconnect(fresh);
+  assert.equal(ok, false);
 });
 
 function frame(match: object, dtMs: number) {

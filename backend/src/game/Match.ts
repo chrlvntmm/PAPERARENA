@@ -23,6 +23,9 @@ export class Match {
   private sessionToPlayer = new Map<string, number>();
   private playerToSession = new Map<number, string>();
   private playerWallets = new Map<number, string>();
+  /** Stable identity (walletId preferred) → player slot for reconnect. */
+  private identityToPlayer = new Map<string, number>();
+  private playerToIdentity = new Map<number, string>();
   private pendingInputs = new Map<number, Dir>();
   private logicAcc = 0;
   private movementTickAcc = 0;
@@ -31,7 +34,8 @@ export class Match {
   private destroyed = false;
   private started = false;
   private countdownRemaining = CONFIG.PRE_MATCH_COUNTDOWN_MS;
-  private disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Disconnect grace timers keyed by playerId (survives session replacement). */
+  private disconnectTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private preDeathCounts = new Map<number, number>();
   private onEnd?: () => void;
   private onChainMatchIdHex?: string;
@@ -70,13 +74,34 @@ export class Match {
       if (entry.session.walletAddress) {
         this.playerWallets.set(i, entry.session.walletAddress);
       }
+      const identity = entry.identityKey || entry.session.walletId || entry.session.walletAddress || entry.session.id;
+      this.identityToPlayer.set(identity, i);
+      this.playerToIdentity.set(i, identity);
       entry.session.matchId = this.id;
       entry.session.playerId = i;
     });
   }
 
+  /** Identities used for reconnect lookup after create. */
+  getIdentityKeys(): string[] {
+    return [...this.identityToPlayer.keys()];
+  }
+
+  hasIdentity(identityKey: string): boolean {
+    return this.identityToPlayer.has(identityKey);
+  }
+
   setOnChainMatchId(onChainMatchIdHex?: string) {
     this.onChainMatchIdHex = onChainMatchIdHex;
+  }
+
+  /** Deploy drain / SIGTERM: end match by current territory and settle escrow. */
+  forceEndForShutdown() {
+    if (this.destroyed) return;
+    if (this.state.winnerId === null) {
+      endTerritoryMatch(this.state);
+    }
+    this.endMatch();
   }
 
   start() {
@@ -170,13 +195,24 @@ export class Match {
   }
 
   handleDisconnect(session: ClientSession) {
-    const existing = this.disconnectTimers.get(session.id);
+    const playerId = session.playerId;
+    if (playerId == null || this.destroyed) return;
+
+    // Detach this socket; slot stays reserved for reconnect within grace.
+    this.sessions.delete(session.id);
+    this.sessionToPlayer.delete(session.id);
+    if (this.playerToSession.get(playerId) === session.id) {
+      this.playerToSession.delete(playerId);
+    }
+
+    const existing = this.disconnectTimers.get(playerId);
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
-      this.disconnectTimers.delete(session.id);
-      const playerId = session.playerId;
-      if (playerId == null || this.destroyed) return;
+      this.disconnectTimers.delete(playerId);
+      if (this.destroyed) return;
+      // Reconnected under a new session — cancel elimination.
+      if (this.playerToSession.has(playerId)) return;
       const p = this.state.players[playerId];
       if (!p?.alive) return;
 
@@ -190,7 +226,53 @@ export class Match {
       }
     }, CONFIG.DISCONNECT_GRACE_MS);
 
-    this.disconnectTimers.set(session.id, timer);
+    this.disconnectTimers.set(playerId, timer);
+  }
+
+  /**
+   * Rebind a new authenticated socket to this player within disconnect grace.
+   * Returns false if identity is not in this match or grace already expired (eliminated).
+   */
+  tryReconnect(session: ClientSession): boolean {
+    if (this.destroyed) return false;
+    const identity =
+      session.walletId ?? session.walletAddress ?? session.userId ?? session.id;
+    const playerId = this.identityToPlayer.get(identity);
+    if (playerId == null) return false;
+
+    const p = this.state.players[playerId];
+    if (!p) return false;
+
+    // Cancel pending force-elim.
+    const timer = this.disconnectTimers.get(playerId);
+    if (timer) {
+      clearTimeout(timer);
+      this.disconnectTimers.delete(playerId);
+    }
+
+    // Drop any stale session still mapped to this slot.
+    const oldSessionId = this.playerToSession.get(playerId);
+    if (oldSessionId && oldSessionId !== session.id) {
+      this.sessions.delete(oldSessionId);
+      this.sessionToPlayer.delete(oldSessionId);
+    }
+
+    this.sessions.set(session.id, session);
+    this.sessionToPlayer.set(session.id, playerId);
+    this.playerToSession.set(playerId, session.id);
+    session.matchId = this.id;
+    session.playerId = playerId;
+
+    const snapshot = buildSnapshot(this.state, this.sessionToPlayer);
+    session.send({
+      type: "match_resume",
+      matchId: this.id,
+      playerId,
+      tick: this.state.elapsed,
+      snapshot,
+    });
+
+    return true;
   }
 
   private notifyElimination(
